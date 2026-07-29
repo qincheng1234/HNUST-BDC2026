@@ -21,8 +21,8 @@ wheels/
 # Local datasets and generated artifacts
 /data/*
 !/data/.gitkeep
-/model/
-/output/*
+#/model/
+#/output/*
 !/output/.gitkeep
 /temp/*
 !/temp/.gitkeep
