@@ -9,6 +9,25 @@ wheels/
 # Virtual environments
 .venv
 
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*_token.txt
+*token*.txt
+*.key
+*.pem
+
+# Local datasets and generated artifacts
+/data/*
+!/data/.gitkeep
+/model/
+/output/*
+!/output/.gitkeep
+/temp/*
+!/temp/.gitkeep
+*.log
+
 
 
 .DS_Store

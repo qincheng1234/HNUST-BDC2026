@@ -1,4 +1,7 @@
 # 配置参数
+import os
+
+
 sequence_length = 60
 feature_num = '158+39'
 config = {
@@ -20,4 +23,14 @@ config = {
 
     'output_dir': f'./model/{sequence_length}_{feature_num}',
     'data_path': './data',
+    'data_mode': os.environ.get('DATA_MODE', 'local_split').strip().lower(),
+    'data_as_of_date': os.environ.get('AS_OF_DATE') or None,
+    'competition_stock_count': 300,
+    'label_horizon_days': 5,
+    'cv_embargo_days': 5,
+    'cv_validation_days': 5,
+    'cv_min_train_days': 180,
+    'cv_folds': 3,
+    'cv_num_epochs': int(os.environ.get('CV_NUM_EPOCHS', '50')),
+    'feature_warmup_days': 120,
 }

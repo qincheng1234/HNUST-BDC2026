@@ -1,5 +1,8 @@
 # THU-BigDataCompetition-2026-baseline
 
+> 当前默认本地模式：训练与预测读取 `data/train.csv`，`data/test.csv` 仅供
+> `score_self.py` 评分。最终提交设置 `DATA_MODE=stock_data` 后，训练与预测改为读取挂载的 `data/stock_data.csv`。
+
 本项目是一个面向沪深300成分股的**排序学习选股**方案：
 - 输入：每只股票过去一段时间（默认60个交易日）的量价与技术特征序列；
 - 模型：`StockTransformer`，同时建模单股票时序模式与股票间交互；
@@ -92,7 +95,7 @@
 ## 3. 数据与输入输出约定
 
 默认训练数据文件：
-- `data/train.csv`
+- `data/stock_data.csv`
 
 关键列：
 - `股票代码`、`日期`、`开盘`、`收盘`、`最高`、`最低`、`成交量`、`成交额`、`换手率`、`涨跌幅` 等。

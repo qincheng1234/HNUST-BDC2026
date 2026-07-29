@@ -1,5 +1,6 @@
 import os
 import multiprocessing as mp
+import json
 
 import joblib
 import numpy as np
@@ -8,6 +9,7 @@ import torch
 from tqdm import tqdm
 
 from config import config
+from data_io import load_prediction_data
 from model import StockTransformer
 from utils import engineer_features_39, engineer_features_158plus39
 
@@ -94,25 +96,41 @@ def build_inference_sequences(data, features, sequence_length, stock_ids, latest
 
 
 def main():
-	data_file = os.path.join(config['data_path'], 'train.csv')
 	model_path = os.path.join(config['output_dir'], 'best_model.pth')
 	scaler_path = os.path.join(config['output_dir'], 'scaler.pkl')
+	metadata_path = os.path.join(config['output_dir'], 'model_meta.json')
 	output_path = os.path.join('./output/', 'result.csv')
+	os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
 	if not os.path.exists(model_path):
 		raise FileNotFoundError(f'未找到模型文件: {model_path}')
 	if not os.path.exists(scaler_path):
 		raise FileNotFoundError(f'未找到Scaler文件: {scaler_path}')
+	if not os.path.exists(metadata_path):
+		raise FileNotFoundError(f'未找到模型元数据文件: {metadata_path}')
 
-	raw_df = pd.read_csv(data_file, dtype={'股票代码': str})
-	raw_df['股票代码'] = raw_df['股票代码'].astype(str).str.zfill(6)
-	raw_df['日期'] = pd.to_datetime(raw_df['日期'])
+	raw_df, available_codes, data_file = load_prediction_data(
+		config['data_path'],
+		data_mode=config['data_mode'],
+		expected_stock_count=config.get('competition_stock_count', 300),
+		as_of_date=config.get('data_as_of_date'),
+	)
 	latest_date = raw_df['日期'].max()
 
-	stock_ids = sorted(raw_df['股票代码'].unique())
+	with open(metadata_path, encoding='utf-8') as handle:
+		metadata = json.load(handle)
+	if metadata.get('data_mode') != config['data_mode']:
+		raise ValueError('模型的数据模式与当前 DATA_MODE 不一致，请先重新训练')
+	stock_ids = metadata['stock_ids']
+	if set(stock_ids) != set(available_codes):
+		raise ValueError('模型股票池与当前 stock_data 股票池不一致，请重新训练')
 	stockid2idx = {sid: idx for idx, sid in enumerate(stock_ids)}
 
-	processed, features = preprocess_predict_data(raw_df, stockid2idx)
+	processed, _ = preprocess_predict_data(raw_df, stockid2idx)
+	features = metadata['features']
+	missing_features = sorted(set(features) - set(processed.columns))
+	if missing_features:
+		raise ValueError(f'预测特征缺失: {missing_features[:5]}')
 	processed[features] = processed[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 	scaler = joblib.load(scaler_path)
@@ -156,6 +174,7 @@ def main():
 	})
 	output_df.to_csv(output_path, index=False)
 
+	print(f'数据模式: {config["data_mode"]}')
 	print(f'预测日期: {latest_date.date()}')
 	print(f'参与排序股票数: {len(ranked_stock_ids)}')
 	print(f'结果已写入: {output_path}')

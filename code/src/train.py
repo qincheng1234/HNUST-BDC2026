@@ -10,12 +10,15 @@ from tensorboardX import SummaryWriter
 from config import config
 from model import StockTransformer
 from utils import engineer_features_39, engineer_features_158plus39
-from utils import create_ranking_dataset_vectorized
+from utils import create_labeled_ranking_dataset, create_ranking_dataset_vectorized
 import joblib
 import os
 import json
 import multiprocessing as mp
 import random
+import copy
+from data_io import load_training_data
+from splits import build_walk_forward_folds, trading_dates_from_frame
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -39,17 +42,18 @@ feature_engineer_func_map = {
 
 def _build_label_and_clean(processed, drop_small_open=True):
     """统一构建标签并清洗无效样本。"""
+    horizon = int(config.get('label_horizon_days', 5))
     processed['open_t1'] = processed.groupby('股票代码')['开盘'].shift(-1)
-    processed['open_t5'] = processed.groupby('股票代码')['开盘'].shift(-5)
+    processed['open_th'] = processed.groupby('股票代码')['开盘'].shift(-horizon)
 
     # 过滤无效开盘价，避免收益率极端爆炸
     if drop_small_open:
         processed = processed[processed['open_t1'] > 1e-4]
 
-    processed['label'] = (processed['open_t5'] - processed['open_t1']) / (processed['open_t1'] + 1e-12)
+    processed['label'] = (processed['open_th'] - processed['open_t1']) / (processed['open_t1'] + 1e-12)
     processed = processed.dropna(subset=['label'])
 
-    processed.drop(columns=['open_t1', 'open_t5'], inplace=True)
+    processed.drop(columns=['open_t1', 'open_th'], inplace=True)
     return processed
 
 
@@ -547,7 +551,7 @@ def split_train_val_by_last_month(df, sequence_length):
     return train_df, val_df, val_start
 
 # 主程序
-def main():
+def legacy_train_main():
     set_seed(config.get('seed', 42))
     output_dir = config['output_dir']
     os.makedirs(output_dir,exist_ok=True)
@@ -565,7 +569,7 @@ def main():
         device = torch.device('cpu')
     
     # 1. 数据加载
-    data_file = os.path.join(data_path, 'train.csv')
+    data_file = os.path.join(data_path, 'stock_data.csv')
     full_df = pd.read_csv(data_file)
     train_df, val_df, val_start = split_train_val_by_last_month(full_df, config['sequence_length'])
     
@@ -695,6 +699,202 @@ def main():
             writer.close()
 
         return best_score
+
+def resolve_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
+def scale_processed_data(processed, features, fit_end_date):
+    scaled = processed.copy()
+    scaled[features] = scaled[features].replace([np.inf, -np.inf], np.nan)
+    fit_rows = scaled[scaled['日期'] <= pd.Timestamp(fit_end_date)].dropna(subset=features)
+    if fit_rows.empty:
+        raise ValueError('No valid training rows are available to fit the feature scaler')
+
+    scaler = StandardScaler()
+    scaler.fit(fit_rows[features])
+    scaled = scaled.dropna(subset=features).copy()
+    scaled[features] = scaler.transform(scaled[features])
+    return scaled, scaler
+
+
+def build_ranking_dataset(processed, features, sequence_length, start_date=None, end_date=None):
+    sequences, targets, relevance, stock_indices = create_labeled_ranking_dataset(
+        processed,
+        features,
+        sequence_length,
+        min_window_end_date=start_date,
+        max_window_end_date=end_date,
+    )
+    return RankingDataset(sequences, targets, relevance, stock_indices)
+
+
+def build_loader(dataset, shuffle):
+    return DataLoader(
+        dataset,
+        batch_size=config['batch_size'],
+        shuffle=shuffle,
+        collate_fn=collate_fn,
+        num_workers=0,
+        pin_memory=False,
+    )
+
+
+def fit_transformer(train_dataset, validation_dataset, input_dim, stock_count, device, epochs):
+    model = StockTransformer(input_dim=input_dim, config=config, num_stocks=stock_count).to(device)
+    criterion = WeightedRankingLoss(
+        k=5,
+        temperature=1.0,
+        weight_factor=config['top5_weight'],
+        pairwise_weight=config['pairwise_weight'],
+        base_weight=config.get('base_weight', 1.0),
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=1e-5)
+    train_loader = build_loader(train_dataset, shuffle=True)
+    validation_loader = build_loader(validation_dataset, shuffle=False) if validation_dataset is not None else None
+
+    best_score = -float('inf')
+    best_epoch = 0
+    best_metrics = {}
+    best_state = None
+    for epoch in range(int(epochs)):
+        train_ranking_model(model, train_loader, criterion, optimizer, device, epoch, writer=None)
+        if validation_loader is None:
+            best_epoch = epoch + 1
+            best_state = copy.deepcopy(model.state_dict())
+            continue
+
+        _, metrics = evaluate_ranking_model(model, validation_loader, criterion, device, writer=None, epoch=epoch)
+        score = float(metrics.get('pred_return_sum', 0.0)) / float(config.get('top_k', 5))
+        if score > best_score:
+            best_score = score
+            best_epoch = epoch + 1
+            best_metrics = metrics
+            best_state = copy.deepcopy(model.state_dict())
+
+    if best_state is None:
+        raise RuntimeError('Transformer training did not produce a model state')
+    model.load_state_dict(best_state)
+    return model, best_epoch, best_metrics, best_score
+
+
+def run_walk_forward_validation(processed, features, stock_count, folds, device):
+    records = []
+    for fold in folds:
+        scaled, _ = scale_processed_data(processed, features, fold['train_sample_end'])
+        train_dataset = build_ranking_dataset(
+            scaled,
+            features,
+            config['sequence_length'],
+            end_date=fold['train_sample_end'],
+        )
+        validation_dataset = build_ranking_dataset(
+            scaled,
+            features,
+            config['sequence_length'],
+            start_date=fold['validation_start'],
+            end_date=fold['validation_end'],
+        )
+        _, best_epoch, metrics, score = fit_transformer(
+            train_dataset,
+            validation_dataset,
+            input_dim=len(features),
+            stock_count=stock_count,
+            device=device,
+            epochs=config.get('cv_num_epochs', config['num_epochs']),
+        )
+        records.append(
+            {
+                'fold': fold['name'],
+                'train_sample_end': fold['train_sample_end'].date().isoformat(),
+                'validation_start': fold['validation_start'].date().isoformat(),
+                'validation_end': fold['validation_end'].date().isoformat(),
+                'best_epoch': best_epoch,
+                'top5_mean_return': score,
+                'metrics': {name: float(value) for name, value in metrics.items()},
+            }
+        )
+        print(
+            f"{fold['name']}: train<= {fold['train_sample_end'].date()}, "
+            f"val={fold['validation_start'].date()}~{fold['validation_end'].date()}, "
+            f"top5_mean_return={score:.6f}"
+        )
+    return records
+
+
+def main():
+    set_seed(config.get('seed', 42))
+    output_dir = config['output_dir']
+    os.makedirs(output_dir, exist_ok=True)
+    full_df, stock_codes, data_file = load_training_data(
+        config['data_path'],
+        data_mode=config['data_mode'],
+        expected_stock_count=config.get('competition_stock_count', 300),
+        as_of_date=config.get('data_as_of_date'),
+    )
+    print(f"Data mode: {config['data_mode']}")
+    print(f"Training input: {data_file}")
+    print(f"Training data range: {full_df['日期'].min().date()} ~ {full_df['日期'].max().date()}")
+
+    stock_ids = sorted(stock_codes)
+    stockid2idx = {stock_id: index for index, stock_id in enumerate(stock_ids)}
+    processed, features = preprocess_data(full_df, is_train=True, stockid2idx=stockid2idx)
+    processed['日期'] = pd.to_datetime(processed['日期'])
+
+    folds = build_walk_forward_folds(
+        trading_dates_from_frame(full_df),
+        label_horizon=int(config['label_horizon_days']),
+        embargo_days=int(config['cv_embargo_days']),
+        validation_days=int(config['cv_validation_days']),
+        min_train_days=int(config['cv_min_train_days']),
+        cv_folds=int(config['cv_folds']),
+        warmup_days=int(config['feature_warmup_days']),
+    )
+    device = resolve_device()
+    oof_records = run_walk_forward_validation(processed, features, len(stock_ids), folds, device)
+
+    final_fit_end = processed['日期'].max()
+    final_scaled, final_scaler = scale_processed_data(processed, features, final_fit_end)
+    final_dataset = build_ranking_dataset(final_scaled, features, config['sequence_length'])
+    selected_epochs = max(1, int(np.median([record['best_epoch'] for record in oof_records])))
+    final_model, _, _, _ = fit_transformer(
+        final_dataset,
+        validation_dataset=None,
+        input_dim=len(features),
+        stock_count=len(stock_ids),
+        device=device,
+        epochs=selected_epochs,
+    )
+
+    torch.save(final_model.state_dict(), os.path.join(output_dir, 'best_model.pth'))
+    joblib.dump(final_scaler, os.path.join(output_dir, 'scaler.pkl'))
+    oof_mean = float(np.mean([record['top5_mean_return'] for record in oof_records]))
+    metadata = {
+        'input_file': str(data_file),
+        'data_mode': config['data_mode'],
+        'data_as_of_date': config.get('data_as_of_date'),
+        'stock_ids': stock_ids,
+        'features': features,
+        'label_horizon_days': int(config['label_horizon_days']),
+        'cv_embargo_days': int(config['cv_embargo_days']),
+        'selected_epochs': selected_epochs,
+        'oof_top5_mean_return': oof_mean,
+        'oof_folds': oof_records,
+    }
+    with open(os.path.join(output_dir, 'model_meta.json'), 'w', encoding='utf-8') as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+    with open(os.path.join(output_dir, 'final_score.txt'), 'w', encoding='utf-8') as handle:
+        handle.write(f"OOF top-5 mean return: {oof_mean:.6f}\n")
+        handle.write(f"Selected epochs: {selected_epochs}\n")
+
+    print(f"Walk-forward OOF top-5 mean return: {oof_mean:.6f}")
+    print(f"Final epochs: {selected_epochs}")
+    return oof_mean
+
 
 if __name__ == "__main__":
     # 多进程保护
