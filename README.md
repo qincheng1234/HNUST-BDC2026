@@ -5,7 +5,7 @@
 
 本项目是一个面向沪深300成分股的**排序学习选股**方案：
 - 输入：每只股票过去一段时间（默认60个交易日）的量价与技术特征序列；
-- 模型：`StockTransformer`，同时建模单股票时序模式与股票间交互；
+- 模型：`MarketGuidedMixer`，以多尺度时序混合和市场状态门控建模排序分数；
 - 输出：对同一天全部候选股票打分并排序，最终输出前5只股票（等权重0.2）。
 
 ---
@@ -29,18 +29,17 @@
 ### [config.py](config.py)
 统一管理训练与推理参数，包括：
 - 序列长度 `sequence_length`（默认60）；
-- 模型超参数（`d_model`、`nhead`、`num_layers` 等）；
+- 模型超参数（`d_model`、`mixer_layers`、`time_mixer_hidden` 等）；
 - 训练超参数（`batch_size`、`num_epochs`、`learning_rate`）；
 - 排序损失权重参数（`pairwise_weight`、`top5_weight`、`base_weight`）；
 - 数据路径和输出路径（默认输出到 `output/`）。
 
 ### [model.py](model.py)
-定义核心模型 `StockTransformer`，主要由以下模块组成：
-- `PositionalEncoding`：时序位置编码；
-- 时序编码器 `TransformerEncoder`：提取单股票历史序列表示；
-- `FeatureAttention`：对时间维特征做注意力聚合；
-- `CrossStockAttention`：在同一交易日内建模股票间关系；
-- `ranking_layers` + `score_head`：输出每只股票的排序分数。
+定义核心模型 `MarketGuidedMixer`，主要由以下模块组成：
+- `TemporalMixBlock`：分解平滑趋势与残差，并使用轻量 MLP 做时序、特征混合；
+- `MultiScalePool`：融合最新、5 日、20 日和全窗口的历史状态；
+- `MarketGuidance`：由同一交易日全部候选股票的表征产生市场门控，并保留个股相对市场状态；
+- `score_head`：输出每只股票的排序分数。
 
 输入形状：`[batch, num_stocks, seq_len, feature_dim]`  
 输出形状：`[batch, num_stocks]`。

@@ -8,7 +8,7 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from config import config
-from model import StockTransformer
+from model import MarketGuidedMixer
 from utils import engineer_features_39, engineer_features_158plus39
 from utils import create_labeled_ranking_dataset, create_ranking_dataset_vectorized
 import joblib
@@ -637,7 +637,7 @@ def legacy_train_main():
     )
     
     # 6. 模型初始化
-    model = StockTransformer(input_dim=len(features), config=config, num_stocks=num_stocks)
+    model = MarketGuidedMixer(input_dim=len(features), config=config, num_stocks=num_stocks)
     model.to(device)
     print(f"模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
@@ -744,8 +744,8 @@ def build_loader(dataset, shuffle):
     )
 
 
-def fit_transformer(train_dataset, validation_dataset, input_dim, stock_count, device, epochs):
-    model = StockTransformer(input_dim=input_dim, config=config, num_stocks=stock_count).to(device)
+def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device, epochs):
+    model = MarketGuidedMixer(input_dim=input_dim, config=config, num_stocks=stock_count).to(device)
     criterion = WeightedRankingLoss(
         k=5,
         temperature=1.0,
@@ -799,7 +799,7 @@ def run_walk_forward_validation(processed, features, stock_count, folds, device)
             start_date=fold['validation_start'],
             end_date=fold['validation_end'],
         )
-        _, best_epoch, metrics, score = fit_transformer(
+        _, best_epoch, metrics, score = fit_model(
             train_dataset,
             validation_dataset,
             input_dim=len(features),
@@ -861,7 +861,7 @@ def main():
     final_scaled, final_scaler = scale_processed_data(processed, features, final_fit_end)
     final_dataset = build_ranking_dataset(final_scaled, features, config['sequence_length'])
     selected_epochs = max(1, int(np.median([record['best_epoch'] for record in oof_records])))
-    final_model, _, _, _ = fit_transformer(
+    final_model, _, _, _ = fit_model(
         final_dataset,
         validation_dataset=None,
         input_dim=len(features),
@@ -876,6 +876,7 @@ def main():
     metadata = {
         'input_file': str(data_file),
         'data_mode': config['data_mode'],
+        'model_type': config['model_type'],
         'data_as_of_date': config.get('data_as_of_date'),
         'stock_ids': stock_ids,
         'features': features,

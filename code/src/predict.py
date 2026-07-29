@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from config import config
 from data_io import load_prediction_data
-from model import StockTransformer
+from model import MarketGuidedMixer
 from utils import engineer_features_39, engineer_features_158plus39
 
 
@@ -121,6 +121,8 @@ def main():
 		metadata = json.load(handle)
 	if metadata.get('data_mode') != config['data_mode']:
 		raise ValueError('模型的数据模式与当前 DATA_MODE 不一致，请先重新训练')
+	if metadata.get('model_type') != config['model_type']:
+		raise ValueError('模型结构与当前配置不一致，请先重新训练')
 	stock_ids = metadata['stock_ids']
 	if set(stock_ids) != set(available_codes):
 		raise ValueError('模型股票池与当前 stock_data 股票池不一致，请重新训练')
@@ -152,7 +154,7 @@ def main():
 	else:
 		device = torch.device('cpu')
 
-	model = StockTransformer(input_dim=len(features), config=config, num_stocks=len(stock_ids))
+	model = MarketGuidedMixer(input_dim=len(features), config=config, num_stocks=len(stock_ids))
 	model.load_state_dict(torch.load(model_path, map_location=device))
 	model.to(device)
 	model.eval()
