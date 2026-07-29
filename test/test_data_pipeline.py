@@ -13,7 +13,7 @@ if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
 from data_io import load_contest_stock_data, load_prediction_data, load_training_data
-from splits import build_walk_forward_folds
+from splits import build_walk_forward_folds, select_robust_epoch
 from utils import create_labeled_ranking_dataset
 
 
@@ -81,6 +81,19 @@ class DataPipelineTest(unittest.TestCase):
             validation_start = positions[fold["validation_start"]]
             self.assertLessEqual(train_end + 5, validation_start - 1)
             self.assertLess(fold["train_data_end"], fold["validation_start"])
+
+    def test_robust_epoch_selection_penalizes_volatile_epochs(self):
+        epoch, diagnostics = select_robust_epoch(
+            [
+                [0.01, 0.03, 0.05],
+                [0.01, 0.03, -0.10],
+            ],
+            risk_penalty=0.25,
+        )
+
+        self.assertEqual(epoch, 2)
+        self.assertAlmostEqual(diagnostics["mean"], 0.03)
+        self.assertAlmostEqual(diagnostics["std"], 0.0)
 
     def test_labeled_dataset_keeps_sessions_across_weekends(self):
         dates = pd.bdate_range("2026-01-01", periods=8)

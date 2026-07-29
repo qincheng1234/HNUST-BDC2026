@@ -7,13 +7,14 @@ feature_num = '158+39'
 config = {
     'sequence_length': sequence_length,   # 使用过去60个交易日的数据（排序任务可以用稍短的序列）
     'model_type': 'market_guided_mixer_v1',
+    'feature_schema_version': 'cross_sectional_v1',
     'd_model': 128,
     'mixer_layers': 2,
     'time_mixer_hidden': 32,
     'mixer_expansion': 2,
     'batch_size': 4,        # 排序任务batch_size可以小一些，因为每个batch包含更多股票
     'num_epochs': 50,       # 排序任务可能需要更多epochs
-    'learning_rate': 1e-5,  # 稍微降低学习率
+    'learning_rate': 1e-4,
     'dropout': 0.1,
     'feature_num': feature_num,
     'max_grad_norm': 5.0,
@@ -29,9 +30,10 @@ config = {
     'competition_stock_count': 300,
     'label_horizon_days': 5,
     'cv_embargo_days': 5,
-    'cv_validation_days': 5,
+    'cv_validation_days': int(os.environ.get('CV_VALIDATION_DAYS', '10')),
     'cv_min_train_days': 180,
-    'cv_folds': 3,
-    'cv_num_epochs': int(os.environ.get('CV_NUM_EPOCHS', '50')),
+    'cv_folds': int(os.environ.get('CV_FOLDS', '6')),
+    'cv_num_epochs': int(os.environ.get('CV_NUM_EPOCHS', '40')),
+    'cv_epoch_risk_penalty': float(os.environ.get('CV_EPOCH_RISK_PENALTY', '0.25')),
     'feature_warmup_days': 120,
 }

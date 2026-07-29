@@ -4,6 +4,69 @@ import joblib
 import os
 from tqdm import tqdm
 
+
+CROSS_SECTIONAL_FEATURES = [
+    'cs_return_1_rank',
+    'cs_return_5_rank',
+    'cs_return_10_rank',
+    'cs_volatility_20_rank',
+    'cs_turnover_rank',
+    'cs_amount_rank',
+    'cs_range_rank',
+    'market_return_1',
+    'market_return_5',
+    'market_breadth_1',
+    'market_dispersion_1',
+    'market_volatility_20',
+    'market_turnover_median',
+    'relative_return_1',
+    'relative_return_5',
+]
+
+
+def build_model_feature_columns(base_columns):
+    """Remove arbitrary identifiers and append causal market-relative features."""
+    return [column for column in base_columns if column != 'instrument'] + CROSS_SECTIONAL_FEATURES
+
+
+def add_cross_sectional_market_features(frame):
+    """Add same-day market state and stock-relative features without future data."""
+    required_columns = {
+        '日期', '成交额', '换手率', 'return_1', 'return_5', 'return_10',
+        'volatility_20', 'high_low_spread', '开盘',
+    }
+    missing_columns = required_columns - set(frame.columns)
+    if missing_columns:
+        raise ValueError(f'无法构建横截面特征，缺少列: {sorted(missing_columns)}')
+
+    data = frame.copy()
+    data['日期'] = pd.to_datetime(data['日期'])
+    grouped = data.groupby('日期', sort=False)
+
+    data['cs_return_1_rank'] = grouped['return_1'].rank(pct=True)
+    data['cs_return_5_rank'] = grouped['return_5'].rank(pct=True)
+    data['cs_return_10_rank'] = grouped['return_10'].rank(pct=True)
+    data['cs_volatility_20_rank'] = grouped['volatility_20'].rank(pct=True)
+    data['cs_turnover_rank'] = grouped['换手率'].rank(pct=True)
+    data['cs_amount_rank'] = np.log1p(data['成交额'].clip(lower=0)).groupby(data['日期']).rank(pct=True)
+    data['cs_range_rank'] = (
+        data['high_low_spread'] / data['开盘'].abs().clip(lower=1e-12)
+    ).groupby(data['日期']).rank(pct=True)
+
+    data['market_return_1'] = grouped['return_1'].transform('median')
+    data['market_return_5'] = grouped['return_5'].transform('median')
+    data['market_breadth_1'] = grouped['return_1'].transform(lambda values: (values > 0).mean())
+    data['market_dispersion_1'] = grouped['return_1'].transform('std').fillna(0.0)
+    data['market_volatility_20'] = grouped['volatility_20'].transform('median')
+    data['market_turnover_median'] = grouped['换手率'].transform('median')
+    data['relative_return_1'] = data['return_1'] - data['market_return_1']
+    data['relative_return_5'] = data['return_5'] - data['market_return_5']
+
+    data[CROSS_SECTIONAL_FEATURES] = data[CROSS_SECTIONAL_FEATURES].replace(
+        [np.inf, -np.inf], np.nan
+    ).fillna(0.0)
+    return data
+
 # 特征工程
 def _rolling_linear_regression(x, y):
     x = np.vstack([np.ones(len(x)), x]).T
@@ -204,8 +267,8 @@ def engineer_features(df):
         feature_names.append(f'BETA{w}')
         
         # R-squared can be calculated as CORREL^2
-        time_period_series = pd.Series(range(w), index=close.index[:w])
-        rolling_corr = close.rolling(w).corr(time_period_series)
+        time_period_series = np.arange(len(close), dtype=float)
+        rolling_corr = talib.CORREL(close, time_period_series, timeperiod=w)
         rsquare = rolling_corr**2
         features.append(rsquare)
         feature_names.append(f'RSQR{w}')

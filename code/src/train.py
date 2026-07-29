@@ -9,6 +9,7 @@ from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from config import config
 from model import MarketGuidedMixer
+from utils import add_cross_sectional_market_features, build_model_feature_columns
 from utils import engineer_features_39, engineer_features_158plus39
 from utils import create_labeled_ranking_dataset, create_ranking_dataset_vectorized
 import joblib
@@ -18,7 +19,7 @@ import multiprocessing as mp
 import random
 import copy
 from data_io import load_training_data
-from splits import build_walk_forward_folds, trading_dates_from_frame
+from splits import build_walk_forward_folds, select_robust_epoch, trading_dates_from_frame
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -61,7 +62,7 @@ def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
     assert config['feature_num'] in feature_engineer_func_map, f"Unsupported feature_num: {config['feature_num']}"
     assert stockid2idx is not None, "stockid2idx 不能为空"
     feature_engineer = feature_engineer_func_map[config['feature_num']]
-    feature_columns = feature_cloums_map[config['feature_num']]
+    feature_columns = build_model_feature_columns(feature_cloums_map[config['feature_num']])
 
     # 保证时序正确，避免 shift 标签错位
     df = df.copy()
@@ -83,6 +84,7 @@ def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
     processed = processed.dropna(subset=['instrument']).copy()
     processed['instrument'] = processed['instrument'].astype(np.int64)
 
+    processed = add_cross_sectional_market_features(processed)
     processed = _build_label_and_clean(processed, drop_small_open=drop_small_open)
     return processed, feature_columns
 
@@ -761,6 +763,7 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
     best_epoch = 0
     best_metrics = {}
     best_state = None
+    epoch_scores = []
     for epoch in range(int(epochs)):
         train_ranking_model(model, train_loader, criterion, optimizer, device, epoch, writer=None)
         if validation_loader is None:
@@ -770,6 +773,7 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
 
         _, metrics = evaluate_ranking_model(model, validation_loader, criterion, device, writer=None, epoch=epoch)
         score = float(metrics.get('pred_return_sum', 0.0)) / float(config.get('top_k', 5))
+        epoch_scores.append(score)
         if score > best_score:
             best_score = score
             best_epoch = epoch + 1
@@ -779,12 +783,13 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
     if best_state is None:
         raise RuntimeError('Transformer training did not produce a model state')
     model.load_state_dict(best_state)
-    return model, best_epoch, best_metrics, best_score
+    return model, best_epoch, best_metrics, best_score, epoch_scores
 
 
 def run_walk_forward_validation(processed, features, stock_count, folds, device):
     records = []
-    for fold in folds:
+    for fold_index, fold in enumerate(folds):
+        set_seed(int(config.get('seed', 42)) + fold_index)
         scaled, _ = scale_processed_data(processed, features, fold['train_sample_end'])
         train_dataset = build_ranking_dataset(
             scaled,
@@ -799,7 +804,7 @@ def run_walk_forward_validation(processed, features, stock_count, folds, device)
             start_date=fold['validation_start'],
             end_date=fold['validation_end'],
         )
-        _, best_epoch, metrics, score = fit_model(
+        _, best_epoch, metrics, score, epoch_scores = fit_model(
             train_dataset,
             validation_dataset,
             input_dim=len(features),
@@ -815,6 +820,7 @@ def run_walk_forward_validation(processed, features, stock_count, folds, device)
                 'validation_end': fold['validation_end'].date().isoformat(),
                 'best_epoch': best_epoch,
                 'top5_mean_return': score,
+                'epoch_scores': epoch_scores,
                 'metrics': {name: float(value) for name, value in metrics.items()},
             }
         )
@@ -856,12 +862,16 @@ def main():
     )
     device = resolve_device()
     oof_records = run_walk_forward_validation(processed, features, len(stock_ids), folds, device)
+    selected_epochs, epoch_selection = select_robust_epoch(
+        [record['epoch_scores'] for record in oof_records],
+        risk_penalty=float(config['cv_epoch_risk_penalty']),
+    )
 
     final_fit_end = processed['日期'].max()
     final_scaled, final_scaler = scale_processed_data(processed, features, final_fit_end)
     final_dataset = build_ranking_dataset(final_scaled, features, config['sequence_length'])
-    selected_epochs = max(1, int(np.median([record['best_epoch'] for record in oof_records])))
-    final_model, _, _, _ = fit_model(
+    set_seed(int(config.get('seed', 42)) + 10_000)
+    final_model, _, _, _, _ = fit_model(
         final_dataset,
         validation_dataset=None,
         input_dim=len(features),
@@ -872,11 +882,16 @@ def main():
 
     torch.save(final_model.state_dict(), os.path.join(output_dir, 'best_model.pth'))
     joblib.dump(final_scaler, os.path.join(output_dir, 'scaler.pkl'))
-    oof_mean = float(np.mean([record['top5_mean_return'] for record in oof_records]))
+    selected_oof_scores = np.asarray(
+        [record['epoch_scores'][selected_epochs - 1] for record in oof_records],
+        dtype=float,
+    )
+    oof_mean = float(selected_oof_scores.mean())
     metadata = {
         'input_file': str(data_file),
         'data_mode': config['data_mode'],
         'model_type': config['model_type'],
+        'feature_schema_version': config['feature_schema_version'],
         'data_as_of_date': config.get('data_as_of_date'),
         'stock_ids': stock_ids,
         'features': features,
@@ -884,6 +899,8 @@ def main():
         'cv_embargo_days': int(config['cv_embargo_days']),
         'selected_epochs': selected_epochs,
         'oof_top5_mean_return': oof_mean,
+        'oof_top5_std': float(selected_oof_scores.std()),
+        'epoch_selection': epoch_selection,
         'oof_folds': oof_records,
     }
     with open(os.path.join(output_dir, 'model_meta.json'), 'w', encoding='utf-8') as handle:

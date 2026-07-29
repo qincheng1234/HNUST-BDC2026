@@ -11,6 +11,7 @@ from tqdm import tqdm
 from config import config
 from data_io import load_prediction_data
 from model import MarketGuidedMixer
+from utils import add_cross_sectional_market_features, build_model_feature_columns
 from utils import engineer_features_39, engineer_features_158plus39
 
 
@@ -55,7 +56,7 @@ feature_engineer_func_map = {
 def preprocess_predict_data(df, stockid2idx):
 	assert config['feature_num'] in feature_engineer_func_map, f"Unsupported feature_num: {config['feature_num']}"
 	feature_engineer = feature_engineer_func_map[config['feature_num']]
-	feature_columns = feature_cloums_map[config['feature_num']]
+	feature_columns = build_model_feature_columns(feature_cloums_map[config['feature_num']])
 
 	df = df.copy()
 	df = df.sort_values(['股票代码', '日期']).reset_index(drop=True)
@@ -64,7 +65,7 @@ def preprocess_predict_data(df, stockid2idx):
 		raise ValueError('输入数据为空，无法预测')
 
 	num_processes = min(10, mp.cpu_count())
-	print('cpus!!!!!!!!!!!!!!!!!!',mp.cpu_count())
+	print(f'特征工程进程数: {num_processes}')
 	with mp.Pool(processes=num_processes) as pool:
 		processed_list = list(tqdm(pool.imap(feature_engineer, groups), total=len(groups), desc='预测集特征工程'))
 
@@ -73,6 +74,7 @@ def preprocess_predict_data(df, stockid2idx):
 	processed = processed.dropna(subset=['instrument']).copy()
 	processed['instrument'] = processed['instrument'].astype(np.int64)
 	processed['日期'] = pd.to_datetime(processed['日期'])
+	processed = add_cross_sectional_market_features(processed)
 
 	return processed, feature_columns
 
@@ -123,6 +125,8 @@ def main():
 		raise ValueError('模型的数据模式与当前 DATA_MODE 不一致，请先重新训练')
 	if metadata.get('model_type') != config['model_type']:
 		raise ValueError('模型结构与当前配置不一致，请先重新训练')
+	if metadata.get('feature_schema_version') != config['feature_schema_version']:
+		raise ValueError('模型特征版本与当前配置不一致，请先重新训练')
 	stock_ids = metadata['stock_ids']
 	if set(stock_ids) != set(available_codes):
 		raise ValueError('模型股票池与当前 stock_data 股票池不一致，请重新训练')

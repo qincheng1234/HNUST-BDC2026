@@ -1,5 +1,6 @@
 """Trading-session-aware splits for leak-free forward-return validation."""
 
+import numpy as np
 import pandas as pd
 
 
@@ -64,3 +65,27 @@ def select_frame_period(frame, start_date=None, end_date=None):
     if end_date is not None:
         selected = selected[selected["日期"] <= pd.Timestamp(end_date)]
     return selected.copy()
+
+
+def select_robust_epoch(fold_epoch_scores, risk_penalty):
+    """Choose a common final epoch using OOF mean return penalized by fold dispersion."""
+    scores = np.asarray(fold_epoch_scores, dtype=float)
+    if scores.ndim != 2 or scores.shape[0] == 0 or scores.shape[1] == 0:
+        raise ValueError('fold_epoch_scores 必须是非空的二维数组')
+    if not np.isfinite(scores).all():
+        raise ValueError('fold_epoch_scores 包含无效值')
+    if risk_penalty < 0:
+        raise ValueError('risk_penalty 不能小于 0')
+
+    mean_scores = scores.mean(axis=0)
+    std_scores = scores.std(axis=0)
+    robust_scores = mean_scores - risk_penalty * std_scores
+    epoch_index = int(np.argmax(robust_scores))
+    return epoch_index + 1, {
+        'mean': float(mean_scores[epoch_index]),
+        'std': float(std_scores[epoch_index]),
+        'robust_score': float(robust_scores[epoch_index]),
+        'per_epoch_mean': mean_scores.tolist(),
+        'per_epoch_std': std_scores.tolist(),
+        'per_epoch_robust_score': robust_scores.tolist(),
+    }
