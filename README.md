@@ -85,9 +85,12 @@
 	 - `weight`（固定 `0.2`）
 
 ### [get_stock_data.py](get_stock_data.py)
-数据抓取脚本（Baostock）：
+数据抓取脚本（仅 Tushare）：
 - 获取沪深300成分股；
 - 抓取历史日线数据并保存为训练所需格式。
+
+下载前将 Tushare token 写入 `temp/tushare_token.txt`，或设置环境变量
+`TUSHARE_TOKEN`；脚本不再依赖 AkShare 或 Baostock。
 
 ---
 
