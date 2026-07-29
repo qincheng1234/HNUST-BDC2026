@@ -99,6 +99,15 @@
 默认训练数据文件：
 - `data/stock_data.csv`
 
+本地评分时，执行以下命令将最后 5 个交易日留作 `data/test.csv`，其余写入
+`data/train.csv`：
+
+```bash
+python scripts/split_train_test.py --input data/stock_data.csv --output-dir data --auto-last-days 5
+```
+
+划分脚本位于 `scripts/`，而不是会被最终验证环境挂载覆盖的 `data/`。
+
 关键列：
 - `股票代码`、`日期`、`开盘`、`收盘`、`最高`、`最低`、`成交量`、`成交额`、`换手率`、`涨跌幅` 等。
 
