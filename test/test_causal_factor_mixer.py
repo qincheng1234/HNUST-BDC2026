@@ -10,7 +10,12 @@ SRC = os.path.join(ROOT, "code", "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from model import CausalCrossSectionalFactorMixer, CrossSectionalResidualFactorMixer, build_model
+from model import (
+    CausalCrossSectionalFactorMixer,
+    CrossSectionalResidualFactorMixer,
+    RiskCalibratedCrossSectionalFactorMixer,
+    build_model,
+)
 
 
 def model_config(sequence_length=12, d_model=32):
@@ -107,6 +112,22 @@ class CausalFactorMixerTest(unittest.TestCase):
 
         self.assertIsInstance(model, CrossSectionalResidualFactorMixer)
         self.assertEqual(outputs["ranking_score"].shape, (1, 6))
+
+    def test_risk_calibrated_score_backpropagates_to_auxiliary_heads(self):
+        torch.manual_seed(37)
+        config = model_config()
+        config["model_type"] = "causal_factor_mixer_v3"
+        model = build_model(5, config, num_stocks=6)
+        inputs = torch.randn(1, 6, 12, 5)
+
+        outputs = model(inputs, mask=torch.ones(1, 6, dtype=torch.bool))
+        outputs["ranking_score"].mean().backward()
+
+        self.assertIsInstance(model, RiskCalibratedCrossSectionalFactorMixer)
+        self.assertIsNotNone(model.horizon_head[-1].weight.grad)
+        self.assertIsNotNone(model.downside_head[-1].weight.grad)
+        self.assertTrue(torch.isfinite(model.horizon_head[-1].weight.grad).all())
+        self.assertTrue(torch.isfinite(model.downside_head[-1].weight.grad).all())
 
 
 if __name__ == "__main__":

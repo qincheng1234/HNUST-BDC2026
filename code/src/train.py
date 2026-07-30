@@ -41,6 +41,14 @@ feature_engineer_func_map = {
     '158+39': engineer_features_158plus39
 }
 
+MULTITASK_MODEL_TYPES = frozenset(
+    {
+        'causal_factor_mixer_v1',
+        'causal_factor_mixer_v2',
+        'causal_factor_mixer_v3',
+    }
+)
+
 
 def _build_label_and_clean(processed, drop_small_open=True):
     """统一构建标签并清洗无效样本。"""
@@ -279,6 +287,25 @@ def calculate_ranking_metrics(y_pred, y_true, masks, k=5):
     metrics['final_score'] = np.mean(final_score_list) if final_score_list else 0.0
     
     return metrics
+
+
+def calculate_mean_rank_ic(predictions, targets, masks):
+    """Calculate mean daily Spearman-style rank correlation on valid stocks."""
+    correlations = []
+    for prediction, target, mask in zip(predictions, targets, masks):
+        valid = mask.bool()
+        if valid.sum() < 3:
+            continue
+        prediction_ranks = torch.argsort(torch.argsort(prediction[valid])).float()
+        target_ranks = torch.argsort(torch.argsort(target[valid])).float()
+        prediction_centered = prediction_ranks - prediction_ranks.mean()
+        target_centered = target_ranks - target_ranks.mean()
+        denominator = prediction_centered.norm() * target_centered.norm()
+        if denominator > 1e-12:
+            correlations.append((prediction_centered * target_centered).sum() / denominator)
+    if not correlations:
+        return 0.0
+    return float(torch.stack(correlations).mean().item())
 
 class RankingDataset(torch.utils.data.Dataset):
     """排序数据集类"""
@@ -554,6 +581,19 @@ def evaluate_ranking_model(model, dataloader, criterion, device, writer, epoch):
             
             # 计算评估指标
             metrics = calculate_ranking_metrics(masked_outputs, masked_targets, masks, k=5)
+            if horizon_outputs is not None:
+                auxiliary_returns = batch['auxiliary_returns'].to(device)
+                downside_targets = batch['downside_targets'].to(device)
+                metrics['return_5_rank_ic'] = calculate_mean_rank_ic(
+                    horizon_outputs[..., 2],
+                    auxiliary_returns[..., 2],
+                    masks,
+                )
+                metrics['downside_rank_ic'] = calculate_mean_rank_ic(
+                    downside_outputs,
+                    downside_targets,
+                    masks,
+                )
             for k, v in metrics.items():
                 if k not in total_metrics:
                     total_metrics[k] = 0
@@ -841,7 +881,7 @@ def scale_processed_data(processed, features, fit_end_date):
 
 
 def build_ranking_dataset(processed, features, sequence_length, start_date=None, end_date=None):
-    if config['model_type'] == 'causal_factor_mixer_v1':
+    if config['model_type'] in MULTITASK_MODEL_TYPES:
         (
             sequences,
             targets,
@@ -896,7 +936,7 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
     )
     criterion = (
         AdaptiveMultiTaskRankingLoss(ranking_loss)
-        if config['model_type'] == 'causal_factor_mixer_v1'
+        if config['model_type'] in MULTITASK_MODEL_TYPES
         else ranking_loss
     ).to(device)
     optimizer = torch.optim.AdamW(
@@ -912,6 +952,7 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
     best_metrics = {}
     best_state = None
     epoch_scores = []
+    epoch_metrics = []
     for epoch in range(int(epochs)):
         train_ranking_model(model, train_loader, criterion, optimizer, device, epoch, writer=None)
         if validation_loader is None:
@@ -922,6 +963,7 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
         _, metrics = evaluate_ranking_model(model, validation_loader, criterion, device, writer=None, epoch=epoch)
         score = float(metrics.get('pred_return_sum', 0.0)) / float(config.get('top_k', 5))
         epoch_scores.append(score)
+        epoch_metrics.append({name: float(value) for name, value in metrics.items()})
         if score > best_score:
             best_score = score
             best_epoch = epoch + 1
@@ -931,7 +973,7 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
     if best_state is None:
         raise RuntimeError('Transformer training did not produce a model state')
     model.load_state_dict(best_state)
-    return model, best_epoch, best_metrics, best_score, epoch_scores
+    return model, best_epoch, best_metrics, best_score, epoch_scores, epoch_metrics
 
 
 def run_walk_forward_validation(processed, features, stock_count, folds, device):
@@ -952,7 +994,7 @@ def run_walk_forward_validation(processed, features, stock_count, folds, device)
             start_date=fold['validation_start'],
             end_date=fold['validation_end'],
         )
-        _, best_epoch, metrics, score, epoch_scores = fit_model(
+        _, best_epoch, metrics, score, epoch_scores, epoch_metrics = fit_model(
             train_dataset,
             validation_dataset,
             input_dim=len(features),
@@ -969,6 +1011,7 @@ def run_walk_forward_validation(processed, features, stock_count, folds, device)
                 'best_epoch': best_epoch,
                 'top5_mean_return': score,
                 'epoch_scores': epoch_scores,
+                'epoch_metrics': epoch_metrics,
                 'metrics': {name: float(value) for name, value in metrics.items()},
             }
         )
@@ -1014,12 +1057,14 @@ def main():
         [record['epoch_scores'] for record in oof_records],
         risk_penalty=float(config['cv_epoch_risk_penalty']),
     )
+    for record in oof_records:
+        record['selected_epoch_metrics'] = record['epoch_metrics'][selected_epochs - 1]
 
     final_fit_end = processed['日期'].max()
     final_scaled, final_scaler = scale_processed_data(processed, features, final_fit_end)
     final_dataset = build_ranking_dataset(final_scaled, features, config['sequence_length'])
     set_seed(int(config.get('seed', 42)) + 10_000)
-    final_model, _, _, _, _ = fit_model(
+    final_model, _, _, _, _, _ = fit_model(
         final_dataset,
         validation_dataset=None,
         input_dim=len(features),
@@ -1035,6 +1080,12 @@ def main():
         dtype=float,
     )
     oof_mean = float(selected_oof_scores.mean())
+    auxiliary_diagnostics = {
+        metric_name: float(
+            np.mean([record['selected_epoch_metrics'].get(metric_name, 0.0) for record in oof_records])
+        )
+        for metric_name in ('return_5_rank_ic', 'downside_rank_ic')
+    }
     metadata = {
         'input_file': str(data_file),
         'data_mode': config['data_mode'],
@@ -1048,6 +1099,7 @@ def main():
         'selected_epochs': selected_epochs,
         'oof_top5_mean_return': oof_mean,
         'oof_top5_std': float(selected_oof_scores.std()),
+        'oof_auxiliary_diagnostics': auxiliary_diagnostics,
         'epoch_selection': epoch_selection,
         'oof_folds': oof_records,
     }
