@@ -1,0 +1,4 @@
+experiment,status,model_type,source_feature_set,feature_count,selected_epochs,oof_top5_mean_return,oof_top5_std,oof_robust_score,worst_fold_return,positive_fold_rate,passes_a_gate,artifact_path,error
+A1,completed,causal_factor_mixer_v2,39,53,1,0.01114939278922975,0.03697302065690161,0.0019061376250043473,-0.0187876354282101,0.3333333333333333,False,model/60_39_causal_residual_factor_mixer__a1/model_meta.json,
+A2,completed,causal_factor_mixer_v2,158+39,183,14,0.0038837937586423447,0.03890675826304355,-0.005842895807118543,-0.06339373029768466,0.6666666666666666,False,model/60_158+39_causal_residual_factor_mixer__a2/model_meta.json,
+A3,completed,causal_factor_mixer_v2,158+39,175,4,0.008401126367971301,0.04876639454225895,-0.0037904722675934366,-0.07307888828217983,0.6666666666666666,False,model/60_158+39_causal_residual_factor_mixer__a3/model_meta.json,
