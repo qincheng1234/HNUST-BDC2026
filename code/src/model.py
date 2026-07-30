@@ -344,43 +344,6 @@ class CrossSectionalResidualFactorMixer(CausalCrossSectionalFactorMixer):
         return standardized
 
 
-class RiskCalibratedCrossSectionalFactorMixer(CrossSectionalResidualFactorMixer):
-    """Learn the final ranking from predicted return paths and downside risk."""
-
-    model_type = "causal_factor_mixer_v3"
-
-    def __init__(self, input_dim, config, num_stocks):
-        super().__init__(input_dim=input_dim, config=config, num_stocks=num_stocks)
-        d_model = int(config["d_model"])
-        dropout = float(config["dropout"])
-        self.calibration_head = nn.Sequential(
-            nn.Linear(d_model + 5, d_model),
-            nn.LayerNorm(d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, 1),
-        )
-        for module in self.calibration_head.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-    def _build_outputs(self, fused_features):
-        base_ranking_score = self.score_head(fused_features)
-        horizon_return = self.horizon_head(fused_features)
-        downside_risk = F.softplus(self.downside_head(fused_features).squeeze(-1))
-        calibration_inputs = torch.cat(
-            [fused_features, base_ranking_score, horizon_return, downside_risk.unsqueeze(-1)],
-            dim=-1,
-        )
-        return {
-            "ranking_score": self.calibration_head(calibration_inputs).squeeze(-1),
-            "horizon_return": horizon_return,
-            "downside_risk": downside_risk,
-        }
-
-
 def build_model(input_dim, config, num_stocks):
     """Construct exactly one configured model for training or inference."""
     model_type = config["model_type"]
@@ -390,6 +353,4 @@ def build_model(input_dim, config, num_stocks):
         return CausalCrossSectionalFactorMixer(input_dim=input_dim, config=config, num_stocks=num_stocks)
     if model_type == CrossSectionalResidualFactorMixer.model_type:
         return CrossSectionalResidualFactorMixer(input_dim=input_dim, config=config, num_stocks=num_stocks)
-    if model_type == RiskCalibratedCrossSectionalFactorMixer.model_type:
-        return RiskCalibratedCrossSectionalFactorMixer(input_dim=input_dim, config=config, num_stocks=num_stocks)
     raise ValueError(f"Unsupported model_type: {model_type}")

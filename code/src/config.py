@@ -6,8 +6,8 @@ sequence_length = 60
 feature_num = '158+39'
 config = {
     'sequence_length': sequence_length,   # 使用过去60个交易日的数据（排序任务可以用稍短的序列）
-    'model_type': 'causal_factor_mixer_v3',
-    'feature_schema_version': 'risk_calibrated_residual_v4',
+    'model_type': 'causal_factor_mixer_v2',
+    'feature_schema_version': 'cross_sectional_residual_v3',
     'd_model': 128,
     'mixer_layers': 2,
     'time_mixer_hidden': 32,
@@ -26,7 +26,7 @@ config = {
     'base_weight': 1.0, # 非top-k样本权重
     'top5_weight': 2.0, # top-5样本权重（应大于base_weight）
 
-    'output_dir': f'./model/{sequence_length}_{feature_num}_risk_calibrated_factor_mixer',
+    'output_dir': f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mixer',
     'data_path': './data',
     'data_mode': os.environ.get('DATA_MODE', 'local_split').strip().lower(),
     'data_as_of_date': os.environ.get('AS_OF_DATE') or None,
