@@ -18,6 +18,7 @@ import json
 import multiprocessing as mp
 import random
 import copy
+import math
 from data_io import load_training_data
 from splits import build_walk_forward_folds, select_robust_epoch, trading_dates_from_frame
 def set_seed(seed=42):
@@ -29,6 +30,40 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     os.environ['PYTHONHASHSEED'] = str(seed)
+
+
+def learning_rate_multiplier(epoch_index, total_epochs, warmup_epochs, min_ratio):
+    """Return a deterministic linear-warmup cosine-decay multiplier."""
+    if total_epochs <= 0:
+        raise ValueError('total_epochs must be positive')
+    if not 0.0 < min_ratio <= 1.0:
+        raise ValueError('min_ratio must be in (0, 1]')
+    if not 0 <= epoch_index < total_epochs:
+        raise ValueError('epoch_index must be within the training range')
+
+    warmup_epochs = min(max(int(warmup_epochs), 0), total_epochs)
+    if warmup_epochs and epoch_index < warmup_epochs:
+        return float(epoch_index + 1) / float(warmup_epochs)
+    if total_epochs == warmup_epochs:
+        return 1.0
+
+    decay_steps = max(total_epochs - warmup_epochs - 1, 1)
+    progress = min(float(epoch_index - warmup_epochs) / float(decay_steps), 1.0)
+    cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_ratio + (1.0 - min_ratio) * cosine_decay
+
+
+def set_epoch_learning_rate(optimizer, epoch_index, total_epochs):
+    """Set the same stable schedule for model and learned-loss parameters."""
+    multiplier = learning_rate_multiplier(
+        epoch_index,
+        total_epochs,
+        config['warmup_epochs'],
+        config['min_learning_rate_ratio'],
+    )
+    for parameter_group in optimizer.param_groups:
+        parameter_group['lr'] = config['learning_rate'] * multiplier
+    return optimizer.param_groups[0]['lr']
 
 feature_cloums_map = {
     '39': ['instrument','开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅','sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv','volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std', 'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',  'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread'],
@@ -462,10 +497,12 @@ def train_ranking_model(model, dataloader, criterion, optimizer, device, epoch, 
                     masks,
                 )
             batch_loss.backward()
-            if not config.get('drop_clip', True):
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
-                if writer:
-                    writer.add_scalar('train/grad_norm', grad_norm, global_step=epoch*len(dataloader)+local_step)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                list(model.parameters()) + list(criterion.parameters()),
+                config['max_grad_norm'],
+            )
+            if writer:
+                writer.add_scalar('train/grad_norm', grad_norm, global_step=epoch*len(dataloader)+local_step)
             optimizer.step()
             
             total_loss += batch_loss.item()
@@ -901,7 +938,7 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
     optimizer = torch.optim.AdamW(
         list(model.parameters()) + list(criterion.parameters()),
         lr=config['learning_rate'],
-        weight_decay=1e-5,
+        weight_decay=config['weight_decay'],
     )
     train_loader = build_loader(train_dataset, shuffle=True)
     validation_loader = build_loader(validation_dataset, shuffle=False) if validation_dataset is not None else None
@@ -912,6 +949,7 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device,
     best_state = None
     epoch_scores = []
     for epoch in range(int(epochs)):
+        set_epoch_learning_rate(optimizer, epoch, int(epochs))
         train_ranking_model(model, train_loader, criterion, optimizer, device, epoch, writer=None)
         if validation_loader is None:
             best_epoch = epoch + 1
@@ -1044,6 +1082,14 @@ def main():
         'features': features,
         'label_horizon_days': int(config['label_horizon_days']),
         'cv_embargo_days': int(config['cv_embargo_days']),
+        'training_hyperparameters': {
+            'learning_rate': float(config['learning_rate']),
+            'weight_decay': float(config['weight_decay']),
+            'warmup_epochs': int(config['warmup_epochs']),
+            'min_learning_rate_ratio': float(config['min_learning_rate_ratio']),
+            'max_grad_norm': float(config['max_grad_norm']),
+            'seed': int(config['seed']),
+        },
         'selected_epochs': selected_epochs,
         'oof_top5_mean_return': oof_mean,
         'oof_top5_std': float(selected_oof_scores.std()),
