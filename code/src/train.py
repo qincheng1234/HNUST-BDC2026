@@ -8,10 +8,10 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from config import config
-from model import MarketGuidedMixer
+from model import build_model
 from utils import add_cross_sectional_market_features, build_model_feature_columns
 from utils import engineer_features_39, engineer_features_158plus39
-from utils import create_labeled_ranking_dataset, create_ranking_dataset_vectorized
+from utils import create_labeled_ranking_dataset, create_multitask_ranking_dataset, create_ranking_dataset_vectorized
 import joblib
 import os
 import json
@@ -44,17 +44,30 @@ feature_engineer_func_map = {
 def _build_label_and_clean(processed, drop_small_open=True):
     """统一构建标签并清洗无效样本。"""
     horizon = int(config.get('label_horizon_days', 5))
-    processed['open_t1'] = processed.groupby('股票代码')['开盘'].shift(-1)
-    processed['open_th'] = processed.groupby('股票代码')['开盘'].shift(-horizon)
+    grouped = processed.groupby('股票代码', sort=False)
+    processed['open_t1'] = grouped['开盘'].shift(-1)
+    processed['open_th'] = grouped['开盘'].shift(-horizon)
+    processed['close_t1'] = grouped['收盘'].shift(-1)
+    processed['open_t3'] = grouped['开盘'].shift(-3)
+    future_open_prices = pd.concat(
+        [grouped['开盘'].shift(-step) for step in range(1, horizon + 1)],
+        axis=1,
+    )
 
     # 过滤无效开盘价，避免收益率极端爆炸
     if drop_small_open:
         processed = processed[processed['open_t1'] > 1e-4]
 
     processed['label'] = (processed['open_th'] - processed['open_t1']) / (processed['open_t1'] + 1e-12)
-    processed = processed.dropna(subset=['label'])
+    processed['label_h1'] = (processed['close_t1'] - processed['open_t1']) / (processed['open_t1'] + 1e-12)
+    processed['label_h3'] = (processed['open_t3'] - processed['open_t1']) / (processed['open_t1'] + 1e-12)
+    processed['label_h5'] = processed['label']
+    processed['downside_5'] = (
+        1.0 - future_open_prices.min(axis=1) / (processed['open_t1'] + 1e-12)
+    ).clip(lower=0.0)
+    processed = processed.dropna(subset=['label', 'label_h1', 'label_h3', 'label_h5', 'downside_5'])
 
-    processed.drop(columns=['open_t1', 'open_th'], inplace=True)
+    processed.drop(columns=['open_t1', 'open_th', 'close_t1', 'open_t3'], inplace=True)
     return processed
 
 
@@ -176,6 +189,34 @@ class WeightedRankingLoss(nn.Module):
         
         return total_loss
 
+
+class AdaptiveMultiTaskRankingLoss(nn.Module):
+    """Combine ranking, multi-horizon return and downside supervision adaptively."""
+
+    def __init__(self, ranking_loss):
+        super().__init__()
+        self.ranking_loss = ranking_loss
+        self.log_task_scales = nn.Parameter(torch.zeros(3))
+
+    def rank_loss(self, predictions, relevance):
+        return self.ranking_loss(predictions, relevance)
+
+    def combine(self, ranking_loss, horizon_prediction, horizon_target, downside_prediction, downside_target, mask):
+        valid_mask = mask.bool()
+        if not valid_mask.any():
+            return ranking_loss
+        horizon_loss = F.smooth_l1_loss(
+            horizon_prediction[valid_mask],
+            horizon_target[valid_mask],
+        )
+        downside_loss = F.smooth_l1_loss(
+            downside_prediction[valid_mask],
+            downside_target[valid_mask],
+        )
+        task_losses = torch.stack([ranking_loss, horizon_loss, downside_loss])
+        log_scales = self.log_task_scales.clamp(min=-3.0, max=3.0)
+        return torch.sum(torch.exp(-log_scales) * task_losses + log_scales)
+
 def calculate_ranking_metrics(y_pred, y_true, masks, k=5):
     """计算新的评估指标：Top 5 收益之和，以及与理论最高值和随机值的比值"""
     batch_size = y_pred.size(0)
@@ -240,22 +281,40 @@ def calculate_ranking_metrics(y_pred, y_true, masks, k=5):
 
 class RankingDataset(torch.utils.data.Dataset):
     """排序数据集类"""
-    def __init__(self, sequences, targets, relevance_scores, stock_indices):
+    def __init__(
+        self,
+        sequences,
+        targets,
+        relevance_scores,
+        stock_indices,
+        auxiliary_returns=None,
+        downside_targets=None,
+    ):
         self.sequences = sequences
         self.targets = targets
         self.relevance_scores = relevance_scores
         self.stock_indices = stock_indices
+        self.auxiliary_returns = auxiliary_returns
+        self.downside_targets = downside_targets
+        if (auxiliary_returns is None) != (downside_targets is None):
+            raise ValueError('Auxiliary returns and downside targets must be provided together')
+        if auxiliary_returns is not None and len(auxiliary_returns) != len(sequences):
+            raise ValueError('Auxiliary target count must match sequence count')
     
     def __len__(self):
         return len(self.sequences)
     
     def __getitem__(self, idx):
-        return {
+        item = {
             'sequences': torch.FloatTensor(self.sequences[idx]),  # [num_stocks, seq_len, features]
             'targets': torch.FloatTensor(self.targets[idx]),      # [num_stocks] 真实涨跌幅
             'relevance': torch.LongTensor(self.relevance_scores[idx]),  # [num_stocks] 排序标签
             'stock_indices': torch.LongTensor(self.stock_indices[idx])  # [num_stocks] 股票索引
         }
+        if self.auxiliary_returns is not None:
+            item['auxiliary_returns'] = torch.FloatTensor(self.auxiliary_returns[idx])
+            item['downside_targets'] = torch.FloatTensor(self.downside_targets[idx])
+        return item
 
 def collate_fn(batch):
     """自定义collate函数处理变长序列"""
@@ -272,9 +331,11 @@ def collate_fn(batch):
     padded_targets = []
     padded_relevance = []
     padded_stock_indices = []
+    padded_auxiliary_returns = []
+    padded_downside_targets = []
     masks = []
     
-    for seq, tgt, rel, stock_idx in zip(sequences, targets, relevance, stock_indices):
+    for item, seq, tgt, rel, stock_idx in zip(batch, sequences, targets, relevance, stock_indices):
         num_stocks = seq.size(0)
         seq_len = seq.size(1)
         feature_dim = seq.size(2)
@@ -301,14 +362,45 @@ def collate_fn(batch):
         padded_relevance.append(rel)
         padded_stock_indices.append(stock_idx)
         masks.append(mask)
+        if 'auxiliary_returns' in batch[0]:
+            auxiliary_returns = item['auxiliary_returns']
+            downside_targets = item['downside_targets']
+            if num_stocks < max_stocks:
+                auxiliary_pad = torch.zeros(pad_size, auxiliary_returns.size(1))
+                downside_pad = torch.zeros(pad_size)
+                auxiliary_returns = torch.cat([auxiliary_returns, auxiliary_pad], dim=0)
+                downside_targets = torch.cat([downside_targets, downside_pad], dim=0)
+            padded_auxiliary_returns.append(auxiliary_returns)
+            padded_downside_targets.append(downside_targets)
     
-    return {
+    collated = {
         'sequences': torch.stack(padded_sequences),      # [batch, max_stocks, seq_len, features]
         'targets': torch.stack(padded_targets),          # [batch, max_stocks]
         'relevance': torch.stack(padded_relevance),      # [batch, max_stocks]
         'stock_indices': torch.stack(padded_stock_indices),  # [batch, max_stocks]
         'masks': torch.stack(masks)                      # [batch, max_stocks]
     }
+    if padded_auxiliary_returns:
+        collated['auxiliary_returns'] = torch.stack(padded_auxiliary_returns)
+        collated['downside_targets'] = torch.stack(padded_downside_targets)
+    return collated
+
+
+def _forward_ranking_model(model, sequences, masks):
+    """Normalize legacy and multi-task model outputs for the training loop."""
+    if getattr(model, 'supports_cross_sectional_mask', False):
+        outputs = model(sequences, mask=masks)
+    else:
+        outputs = model(sequences)
+    if isinstance(outputs, dict):
+        return outputs['ranking_score'], outputs['horizon_return'], outputs['downside_risk']
+    return outputs, None, None
+
+
+def _ranking_loss(criterion, predictions, relevance):
+    if isinstance(criterion, AdaptiveMultiTaskRankingLoss):
+        return criterion.rank_loss(predictions, relevance)
+    return criterion(predictions, relevance)
 
 # 排序训练函数
 def train_ranking_model(model, dataloader, criterion, optimizer, device, epoch, writer):
@@ -326,7 +418,7 @@ def train_ranking_model(model, dataloader, criterion, optimizer, device, epoch, 
         optimizer.zero_grad()
         
         # 模型预测
-        outputs = model(sequences)  # [batch, max_stocks] 预测分数
+        outputs, horizon_outputs, downside_outputs = _forward_ranking_model(model, sequences, masks)
         
         # 应用mask，只考虑有效股票
         masked_outputs = outputs * masks + (1 - masks) * (-1e9)  # 无效位置设为很小的值
@@ -353,11 +445,22 @@ def train_ranking_model(model, dataloader, criterion, optimizer, device, epoch, 
             
             if len(valid_pred) > 1:
                 # 直接使用预处理好的相关性得分，无需重新计算
-                loss = criterion(valid_pred.unsqueeze(0), valid_relevance.unsqueeze(0))
+                loss = _ranking_loss(criterion, valid_pred.unsqueeze(0), valid_relevance.unsqueeze(0))
                 batch_loss = batch_loss + loss if isinstance(batch_loss, torch.Tensor) else loss
         
         if batch_loss is not None:
             batch_loss = batch_loss / batch_size
+            if isinstance(criterion, AdaptiveMultiTaskRankingLoss):
+                auxiliary_returns = batch['auxiliary_returns'].to(device)
+                downside_targets = batch['downside_targets'].to(device)
+                batch_loss = criterion.combine(
+                    batch_loss,
+                    horizon_outputs,
+                    auxiliary_returns,
+                    downside_outputs,
+                    downside_targets,
+                    masks,
+                )
             batch_loss.backward()
             if not config.get('drop_clip', True):
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
@@ -401,7 +504,7 @@ def evaluate_ranking_model(model, dataloader, criterion, device, writer, epoch):
             masks = batch['masks'].to(device)
             
             # 模型预测
-            outputs = model(sequences)
+            outputs, horizon_outputs, downside_outputs = _forward_ranking_model(model, sequences, masks)
             
             # 应用mask
             masked_outputs = outputs * masks + (1 - masks) * (-1e9)
@@ -430,11 +533,22 @@ def evaluate_ranking_model(model, dataloader, criterion, device, writer, epoch):
                     relevance_scores[sorted_indices] = torch.arange(len(valid_true), 0, -1, device=device, dtype=torch.float32)
                     relevance_scores = relevance_scores.detach()
                     
-                    loss = criterion(valid_pred.unsqueeze(0), relevance_scores.unsqueeze(0))
+                    loss = _ranking_loss(criterion, valid_pred.unsqueeze(0), relevance_scores.unsqueeze(0))
                     batch_loss = batch_loss + loss if batch_loss is not None else loss
             
             if batch_loss is not None:
                 batch_loss = batch_loss / batch_size
+                if isinstance(criterion, AdaptiveMultiTaskRankingLoss):
+                    auxiliary_returns = batch['auxiliary_returns'].to(device)
+                    downside_targets = batch['downside_targets'].to(device)
+                    batch_loss = criterion.combine(
+                        batch_loss,
+                        horizon_outputs,
+                        auxiliary_returns,
+                        downside_outputs,
+                        downside_targets,
+                        masks,
+                    )
                 total_loss += batch_loss.item()
             
             # 计算评估指标
@@ -494,7 +608,8 @@ def predict_top_stocks(model, data, features, sequence_length, scaler, stockid2i
     
     with torch.no_grad():
         # 模型预测
-        outputs = model(sequences)  # [1, num_stocks]
+        masks = torch.ones(sequences.shape[:2], device=device)
+        outputs, _, _ = _forward_ranking_model(model, sequences, masks)
         scores = outputs.squeeze().cpu().numpy()  # [num_stocks]
         
         # 获取排名前top_k的股票
@@ -639,7 +754,7 @@ def legacy_train_main():
     )
     
     # 6. 模型初始化
-    model = MarketGuidedMixer(input_dim=len(features), config=config, num_stocks=num_stocks)
+    model = build_model(input_dim=len(features), config=config, num_stocks=num_stocks)
     model.to(device)
     print(f"模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     
@@ -725,6 +840,29 @@ def scale_processed_data(processed, features, fit_end_date):
 
 
 def build_ranking_dataset(processed, features, sequence_length, start_date=None, end_date=None):
+    if config['model_type'] == 'causal_factor_mixer_v1':
+        (
+            sequences,
+            targets,
+            relevance,
+            stock_indices,
+            auxiliary_returns,
+            downside_targets,
+        ) = create_multitask_ranking_dataset(
+            processed,
+            features,
+            sequence_length,
+            min_window_end_date=start_date,
+            max_window_end_date=end_date,
+        )
+        return RankingDataset(
+            sequences,
+            targets,
+            relevance,
+            stock_indices,
+            auxiliary_returns=auxiliary_returns,
+            downside_targets=downside_targets,
+        )
     sequences, targets, relevance, stock_indices = create_labeled_ranking_dataset(
         processed,
         features,
@@ -747,15 +885,24 @@ def build_loader(dataset, shuffle):
 
 
 def fit_model(train_dataset, validation_dataset, input_dim, stock_count, device, epochs):
-    model = MarketGuidedMixer(input_dim=input_dim, config=config, num_stocks=stock_count).to(device)
-    criterion = WeightedRankingLoss(
+    model = build_model(input_dim=input_dim, config=config, num_stocks=stock_count).to(device)
+    ranking_loss = WeightedRankingLoss(
         k=5,
         temperature=1.0,
         weight_factor=config['top5_weight'],
         pairwise_weight=config['pairwise_weight'],
         base_weight=config.get('base_weight', 1.0),
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=1e-5)
+    criterion = (
+        AdaptiveMultiTaskRankingLoss(ranking_loss)
+        if config['model_type'] == 'causal_factor_mixer_v1'
+        else ranking_loss
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        list(model.parameters()) + list(criterion.parameters()),
+        lr=config['learning_rate'],
+        weight_decay=1e-5,
+    )
     train_loader = build_loader(train_dataset, shuffle=True)
     validation_loader = build_loader(validation_dataset, shuffle=False) if validation_dataset is not None else None
 

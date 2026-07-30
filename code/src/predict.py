@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from config import config
 from data_io import load_prediction_data
-from model import MarketGuidedMixer
+from model import build_model
 from utils import add_cross_sectional_market_features, build_model_feature_columns
 from utils import engineer_features_39, engineer_features_158plus39
 
@@ -158,14 +158,18 @@ def main():
 	else:
 		device = torch.device('cpu')
 
-	model = MarketGuidedMixer(input_dim=len(features), config=config, num_stocks=len(stock_ids))
+	model = build_model(input_dim=len(features), config=config, num_stocks=len(stock_ids))
 	model.load_state_dict(torch.load(model_path, map_location=device))
 	model.to(device)
 	model.eval()
 
 	with torch.no_grad():
 		x = torch.from_numpy(sequences_np).unsqueeze(0).to(device)  # [1, N, L, F]
-		scores = model(x).squeeze(0).detach().cpu().numpy()         # [N]
+		if getattr(model, 'supports_cross_sectional_mask', False):
+			outputs = model(x, mask=torch.ones(x.shape[:2], dtype=torch.bool, device=device))
+			scores = outputs['ranking_score'].squeeze(0).detach().cpu().numpy()
+		else:
+			scores = model(x).squeeze(0).detach().cpu().numpy()
 
 	order = np.argsort(scores)[::-1]
 	ranked_stock_ids = [sequence_stock_ids[i] for i in order]

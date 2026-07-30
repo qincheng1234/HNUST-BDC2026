@@ -14,7 +14,7 @@ if SRC not in sys.path:
 
 from data_io import load_contest_stock_data, load_prediction_data, load_training_data
 from splits import build_walk_forward_folds, select_robust_epoch
-from utils import create_labeled_ranking_dataset
+from utils import create_labeled_ranking_dataset, create_multitask_ranking_dataset
 
 
 class DataPipelineTest(unittest.TestCase):
@@ -116,6 +116,35 @@ class DataPipelineTest(unittest.TestCase):
 
         self.assertEqual(len(sequences), 6)
         self.assertTrue(all(sequence.shape == (10, 3, 1) for sequence in sequences))
+
+    def test_multitask_dataset_aligns_auxiliary_targets_with_each_day(self):
+        dates = pd.bdate_range("2026-01-01", periods=5)
+        rows = []
+        for instrument in range(10):
+            for date_index, date in enumerate(dates):
+                rows.append(
+                    {
+                        "instrument": instrument,
+                        "日期": date,
+                        "feature": float(instrument + date_index),
+                        "label": float(instrument - date_index),
+                        "label_h1": float(date_index),
+                        "label_h3": float(date_index + 1),
+                        "label_h5": float(date_index + 2),
+                        "downside_5": float(instrument) / 100.0,
+                    }
+                )
+        sequences, targets, _, _, auxiliary_returns, downside_targets = create_multitask_ranking_dataset(
+            pd.DataFrame(rows),
+            features=["feature"],
+            sequence_length=3,
+        )
+
+        self.assertEqual(len(sequences), 3)
+        self.assertEqual(targets[0].shape, (10,))
+        self.assertEqual(auxiliary_returns[0].shape, (10, 3))
+        self.assertEqual(downside_targets[0].shape, (10,))
+        self.assertTrue(np.allclose(auxiliary_returns[0][0], [2.0, 3.0, 4.0]))
 
     def test_production_entrypoints_use_mode_specific_loaders(self):
         with open(os.path.join(ROOT, "code/src/train.py"), encoding="utf-8") as handle:

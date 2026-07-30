@@ -765,3 +765,77 @@ def create_labeled_ranking_dataset(
     if not sequences:
         raise ValueError("No complete cross-sectional ranking samples are available")
     return sequences, targets, relevance_scores, stock_indices
+
+
+def create_multitask_ranking_dataset(
+    data,
+    features,
+    sequence_length,
+    min_window_end_date=None,
+    max_window_end_date=None,
+):
+    """Create date-level ranking samples with causal auxiliary supervision."""
+    target_columns = ['label', 'label_h1', 'label_h3', 'label_h5', 'downside_5']
+    prepared = data.copy()
+    prepared['日期'] = pd.to_datetime(prepared['日期'])
+    prepared = prepared.dropna(subset=target_columns)
+    prepared = prepared.sort_values(['instrument', '日期']).reset_index(drop=True)
+    min_date = pd.Timestamp(min_window_end_date) if min_window_end_date is not None else None
+    max_date = pd.Timestamp(max_window_end_date) if max_window_end_date is not None else None
+    windows = []
+
+    for instrument, group in prepared.groupby('instrument', sort=False):
+        if len(group) < sequence_length:
+            continue
+        feature_values = group[features].to_numpy(dtype=np.float32, copy=False)
+        primary_targets = group['label'].to_numpy(dtype=np.float32, copy=False)
+        auxiliary_targets = group[['label_h1', 'label_h3', 'label_h5']].to_numpy(
+            dtype=np.float32,
+            copy=False,
+        )
+        downside_targets = group['downside_5'].to_numpy(dtype=np.float32, copy=False)
+        dates = group['日期'].to_numpy()
+        for start_index in range(len(group) - sequence_length + 1):
+            end_index = start_index + sequence_length - 1
+            end_date = pd.Timestamp(dates[end_index])
+            if min_date is not None and end_date < min_date:
+                continue
+            if max_date is not None and end_date > max_date:
+                continue
+            windows.append(
+                (
+                    end_date,
+                    int(instrument),
+                    feature_values[start_index : end_index + 1],
+                    primary_targets[end_index],
+                    auxiliary_targets[end_index],
+                    downside_targets[end_index],
+                )
+            )
+
+    if not windows:
+        raise ValueError('No multi-task ranking samples are available for this period')
+
+    window_frame = pd.DataFrame(
+        windows,
+        columns=['date', 'instrument', 'sequence', 'target', 'auxiliary_return', 'downside_target'],
+    )
+    sequences, targets, relevance_scores, stock_indices = [], [], [], []
+    auxiliary_returns, downside_targets = [], []
+    for _, group in window_frame.groupby('date', sort=True):
+        if len(group) < 10:
+            continue
+        day_targets = group['target'].to_numpy(dtype=np.float32, copy=False)
+        order = np.argsort(day_targets)[::-1]
+        relevance = np.empty(len(day_targets), dtype=np.float32)
+        relevance[order] = np.arange(len(day_targets), 0, -1, dtype=np.float32)
+        sequences.append(np.stack(group['sequence'].to_numpy()))
+        targets.append(day_targets)
+        relevance_scores.append(relevance)
+        stock_indices.append(group['instrument'].to_numpy(dtype=np.int64, copy=False))
+        auxiliary_returns.append(np.stack(group['auxiliary_return'].to_numpy()).astype(np.float32))
+        downside_targets.append(group['downside_target'].to_numpy(dtype=np.float32, copy=False))
+
+    if not sequences:
+        raise ValueError('No complete multi-task cross-sectional samples are available')
+    return sequences, targets, relevance_scores, stock_indices, auxiliary_returns, downside_targets
