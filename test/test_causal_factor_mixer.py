@@ -12,7 +12,9 @@ if SRC not in sys.path:
 
 from model import (
     CausalCrossSectionalFactorMixer,
+    CausalMultiscaleMarketFactorMixer,
     CrossSectionalResidualFactorMixer,
+    _causal_moving_average,
     build_model,
 )
 
@@ -111,6 +113,59 @@ class CausalFactorMixerTest(unittest.TestCase):
 
         self.assertIsInstance(model, CrossSectionalResidualFactorMixer)
         self.assertEqual(outputs["ranking_score"].shape, (1, 6))
+
+    def test_causal_moving_average_does_not_use_later_steps(self):
+        inputs = torch.tensor([[[1.0], [2.0], [3.0], [4.0], [5.0]]])
+        changed_inputs = inputs.clone()
+        changed_inputs[:, 3:] += 100.0
+
+        original = _causal_moving_average(inputs, window=3)
+        changed = _causal_moving_average(changed_inputs, window=3)
+
+        self.assertTrue(torch.allclose(original[:, :3], changed[:, :3]))
+
+    def test_multiscale_market_mixer_factory_and_masking(self):
+        torch.manual_seed(37)
+        config = model_config(sequence_length=12, d_model=32)
+        config.update(
+            {
+                "model_type": "causal_multiscale_market_mixer_v1",
+                "stock_short_window": 3,
+                "stock_long_window": 6,
+                "market_token_windows": (1, 3, 6),
+            }
+        )
+        model = build_model(5, config, num_stocks=6).eval()
+        self.assertIsInstance(model, CausalMultiscaleMarketFactorMixer)
+
+        inputs = torch.randn(1, 6, 12, 5)
+        mask = torch.tensor([[True, True, True, True, False, False]])
+        changed_inputs = inputs.clone()
+        changed_inputs[:, 4:] += 100.0
+
+        with torch.no_grad():
+            original = model(inputs, mask=mask)["ranking_score"]
+            changed = model(changed_inputs, mask=mask)["ranking_score"]
+
+        self.assertEqual(original.shape, (1, 6))
+        self.assertTrue(torch.allclose(original[:, :4], changed[:, :4], atol=1e-6))
+
+    def test_multiscale_market_mixer_is_compact(self):
+        config = model_config(sequence_length=60, d_model=128)
+        config.update(
+            {
+                "model_type": "causal_multiscale_market_mixer_v1",
+                "time_mixer_hidden": 32,
+                "factor_count": 8,
+                "stock_short_window": 5,
+                "stock_long_window": 20,
+                "market_token_windows": (1, 5, 20),
+            }
+        )
+        model = build_model(211, config, num_stocks=300)
+        parameter_count = sum(parameter.numel() for parameter in model.parameters())
+
+        self.assertLess(parameter_count, 1_000_000)
 
 if __name__ == "__main__":
     unittest.main()

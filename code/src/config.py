@@ -3,23 +3,20 @@ import os
 
 
 sequence_length = 60
-feature_experiment = os.environ.get('FEATURE_EXPERIMENT', 'A0').strip().upper()
-if feature_experiment not in {'A0', 'A1', 'A2', 'A3'}:
-    raise ValueError('FEATURE_EXPERIMENT must be one of A0, A1, A2, A3')
-
-feature_num = '39' if feature_experiment == 'A1' else '158+39'
-output_dir = f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mixer'
-if feature_experiment != 'A0':
-    output_dir = f'{output_dir}__{feature_experiment.lower()}'
+feature_num = '158+39'
+output_dir = f'./model/{sequence_length}_{feature_num}_causal_multiscale_market_mixer'
 
 config = {
     'sequence_length': sequence_length,   # 使用过去60个交易日的数据（排序任务可以用稍短的序列）
-    'model_type': 'causal_factor_mixer_v2',
-    'feature_schema_version': 'cross_sectional_residual_v3',
+    'model_type': 'causal_multiscale_market_mixer_v1',
+    'feature_schema_version': 'cross_sectional_residual_multiscale_v1',
     'd_model': 128,
     'mixer_layers': 2,
     'time_mixer_hidden': 32,
     'mixer_expansion': 2,
+    'stock_short_window': 5,
+    'stock_long_window': 20,
+    'market_token_windows': (1, 5, 20),
     'factor_count': 8,
     'market_mixer_layers': 1,
     'cross_sectional_epsilon': 1e-6,
@@ -28,7 +25,6 @@ config = {
     'learning_rate': 1e-4,
     'dropout': 0.1,
     'feature_num': feature_num,
-    'feature_experiment': feature_experiment,
     'max_grad_norm': 5.0,
 
     'pairwise_weight': 1, # 配对损失权重
