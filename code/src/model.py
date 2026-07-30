@@ -274,6 +274,18 @@ class CausalCrossSectionalFactorMixer(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
+    def _prepare_stock_inputs(self, inputs, mask):
+        return inputs
+
+    def _encode_stock_features(self, inputs, mask):
+        batch_size, stock_count, sequence_length, feature_count = inputs.shape
+        stock_inputs = self._prepare_stock_inputs(inputs, mask)
+        temporal_inputs = stock_inputs.reshape(batch_size * stock_count, sequence_length, feature_count)
+        stock_temporal = self.input_projection(temporal_inputs)
+        for block in self.temporal_blocks:
+            stock_temporal = block(stock_temporal)
+        return self.temporal_pool(stock_temporal).reshape(batch_size, stock_count, -1)
+
     def forward(self, inputs, mask=None):
         batch_size, stock_count, sequence_length, feature_count = inputs.shape
         if sequence_length != self.sequence_length:
@@ -283,11 +295,7 @@ class CausalCrossSectionalFactorMixer(nn.Module):
         if mask is not None and mask.shape != (batch_size, stock_count):
             raise ValueError("Cross-sectional mask shape must match [batch, stock_count]")
 
-        temporal_inputs = inputs.reshape(batch_size * stock_count, sequence_length, feature_count)
-        stock_temporal = self.input_projection(temporal_inputs)
-        for block in self.temporal_blocks:
-            stock_temporal = block(stock_temporal)
-        stock_features = self.temporal_pool(stock_temporal).reshape(batch_size, stock_count, -1)
+        stock_features = self._encode_stock_features(inputs, mask)
 
         market_sequence = _masked_mean(inputs, mask, dim=1)
         market_temporal = self.market_projection(market_sequence)
@@ -314,6 +322,25 @@ class CausalCrossSectionalFactorMixer(nn.Module):
         }
 
 
+class CrossSectionalResidualFactorMixer(CausalCrossSectionalFactorMixer):
+    """Separate market-common inputs from standardized idiosyncratic paths."""
+
+    model_type = "causal_factor_mixer_v2"
+
+    def __init__(self, input_dim, config, num_stocks):
+        super().__init__(input_dim=input_dim, config=config, num_stocks=num_stocks)
+        self.residual_epsilon = float(config.get("cross_sectional_epsilon", 1e-6))
+
+    def _prepare_stock_inputs(self, inputs, mask):
+        market_mean = _masked_mean(inputs, mask, dim=1).unsqueeze(1)
+        centered = inputs - market_mean
+        market_variance = _masked_mean(centered.square(), mask, dim=1).unsqueeze(1)
+        standardized = centered / torch.sqrt(market_variance + self.residual_epsilon)
+        if mask is not None:
+            standardized = standardized * mask.unsqueeze(-1).unsqueeze(-1).to(standardized.dtype)
+        return standardized
+
+
 def build_model(input_dim, config, num_stocks):
     """Construct exactly one configured model for training or inference."""
     model_type = config["model_type"]
@@ -321,4 +348,6 @@ def build_model(input_dim, config, num_stocks):
         return MarketGuidedMixer(input_dim=input_dim, config=config, num_stocks=num_stocks)
     if model_type == CausalCrossSectionalFactorMixer.model_type:
         return CausalCrossSectionalFactorMixer(input_dim=input_dim, config=config, num_stocks=num_stocks)
+    if model_type == CrossSectionalResidualFactorMixer.model_type:
+        return CrossSectionalResidualFactorMixer(input_dim=input_dim, config=config, num_stocks=num_stocks)
     raise ValueError(f"Unsupported model_type: {model_type}")

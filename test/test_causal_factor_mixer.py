@@ -10,7 +10,7 @@ SRC = os.path.join(ROOT, "code", "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from model import CausalCrossSectionalFactorMixer, build_model
+from model import CausalCrossSectionalFactorMixer, CrossSectionalResidualFactorMixer, build_model
 
 
 def model_config(sequence_length=12, d_model=32):
@@ -82,6 +82,31 @@ class CausalFactorMixerTest(unittest.TestCase):
 
         self.assertIsInstance(model, CausalCrossSectionalFactorMixer)
         self.assertLess(parameter_count, 800_000)
+
+    def test_residual_encoder_is_invariant_to_market_common_offsets(self):
+        torch.manual_seed(29)
+        config = model_config()
+        model = CrossSectionalResidualFactorMixer(5, config, num_stocks=6)
+        inputs = torch.randn(2, 6, 12, 5)
+        common_offset = torch.randn(2, 1, 12, 5)
+        mask = torch.ones(2, 6, dtype=torch.bool)
+
+        original = model._prepare_stock_inputs(inputs, mask)
+        shifted = model._prepare_stock_inputs(inputs + common_offset, mask)
+
+        self.assertTrue(torch.allclose(original, shifted, atol=1e-6))
+
+    def test_residual_model_factory_and_outputs(self):
+        torch.manual_seed(31)
+        config = model_config()
+        config["model_type"] = "causal_factor_mixer_v2"
+        model = build_model(5, config, num_stocks=6)
+        inputs = torch.randn(1, 6, 12, 5)
+
+        outputs = model(inputs, mask=torch.ones(1, 6, dtype=torch.bool))
+
+        self.assertIsInstance(model, CrossSectionalResidualFactorMixer)
+        self.assertEqual(outputs["ranking_score"].shape, (1, 6))
 
 
 if __name__ == "__main__":

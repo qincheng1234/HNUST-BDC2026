@@ -6,30 +6,27 @@ sequence_length = 60
 feature_num = '158+39'
 config = {
     'sequence_length': sequence_length,   # 使用过去60个交易日的数据（排序任务可以用稍短的序列）
-    'model_type': 'causal_factor_mixer_v1',
-    'feature_schema_version': 'cross_sectional_factor_v2',
+    'model_type': 'causal_factor_mixer_v2',
+    'feature_schema_version': 'cross_sectional_residual_v3',
     'd_model': 128,
     'mixer_layers': 2,
     'time_mixer_hidden': 32,
     'mixer_expansion': 2,
     'factor_count': 8,
     'market_mixer_layers': 1,
+    'cross_sectional_epsilon': 1e-6,
     'batch_size': 4,        # 排序任务batch_size可以小一些，因为每个batch包含更多股票
     'num_epochs': 50,       # 排序任务可能需要更多epochs
-    'learning_rate': float(os.environ.get('LEARNING_RATE', '5e-5')),
-    'weight_decay': float(os.environ.get('WEIGHT_DECAY', '1e-4')),
-    'warmup_epochs': int(os.environ.get('WARMUP_EPOCHS', '3')),
-    'min_learning_rate_ratio': float(os.environ.get('MIN_LEARNING_RATE_RATIO', '0.2')),
+    'learning_rate': 1e-4,
     'dropout': 0.1,
     'feature_num': feature_num,
-    'max_grad_norm': float(os.environ.get('MAX_GRAD_NORM', '1.0')),
-    'seed': 42,
+    'max_grad_norm': 5.0,
 
     'pairwise_weight': 1, # 配对损失权重
     'base_weight': 1.0, # 非top-k样本权重
     'top5_weight': 2.0, # top-5样本权重（应大于base_weight）
 
-    'output_dir': f'./model/{sequence_length}_{feature_num}_causal_factor_mixer',
+    'output_dir': f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mixer',
     'data_path': './data',
     'data_mode': os.environ.get('DATA_MODE', 'local_split').strip().lower(),
     'data_as_of_date': os.environ.get('AS_OF_DATE') or None,
