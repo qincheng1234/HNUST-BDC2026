@@ -3,7 +3,15 @@ import os
 
 
 sequence_length = 60
-feature_num = '158+39'
+feature_experiment = os.environ.get('FEATURE_EXPERIMENT', 'A0').strip().upper()
+if feature_experiment not in {'A0', 'A1', 'A2', 'A3'}:
+    raise ValueError('FEATURE_EXPERIMENT must be one of A0, A1, A2, A3')
+
+feature_num = '39' if feature_experiment == 'A1' else '158+39'
+output_dir = f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mixer'
+if feature_experiment != 'A0':
+    output_dir = f'{output_dir}__{feature_experiment.lower()}'
+
 config = {
     'sequence_length': sequence_length,   # 使用过去60个交易日的数据（排序任务可以用稍短的序列）
     'model_type': 'causal_factor_mixer_v2',
@@ -20,13 +28,14 @@ config = {
     'learning_rate': 1e-4,
     'dropout': 0.1,
     'feature_num': feature_num,
+    'feature_experiment': feature_experiment,
     'max_grad_norm': 5.0,
 
     'pairwise_weight': 1, # 配对损失权重
     'base_weight': 1.0, # 非top-k样本权重
     'top5_weight': 2.0, # top-5样本权重（应大于base_weight）
 
-    'output_dir': f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mixer',
+    'output_dir': output_dir,
     'data_path': './data',
     'data_mode': os.environ.get('DATA_MODE', 'local_split').strip().lower(),
     'data_as_of_date': os.environ.get('AS_OF_DATE') or None,

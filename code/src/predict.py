@@ -13,6 +13,7 @@ from data_io import load_prediction_data
 from model import build_model
 from utils import add_cross_sectional_market_features, build_model_feature_columns
 from utils import engineer_features_39, engineer_features_158plus39
+from utils import select_feature_experiment_columns
 
 
 feature_cloums_map = {
@@ -56,7 +57,12 @@ feature_engineer_func_map = {
 def preprocess_predict_data(df, stockid2idx):
 	assert config['feature_num'] in feature_engineer_func_map, f"Unsupported feature_num: {config['feature_num']}"
 	feature_engineer = feature_engineer_func_map[config['feature_num']]
-	feature_columns = build_model_feature_columns(feature_cloums_map[config['feature_num']])
+	base_feature_columns = select_feature_experiment_columns(
+		feature_cloums_map,
+		source_feature_set=config['feature_num'],
+		experiment=config['feature_experiment'],
+	)
+	feature_columns = build_model_feature_columns(base_feature_columns)
 
 	df = df.copy()
 	df = df.sort_values(['股票代码', '日期']).reset_index(drop=True)
@@ -127,6 +133,10 @@ def main():
 		raise ValueError('模型结构与当前配置不一致，请先重新训练')
 	if metadata.get('feature_schema_version') != config['feature_schema_version']:
 		raise ValueError('模型特征版本与当前配置不一致，请先重新训练')
+	if metadata.get('feature_experiment', 'A0') != config['feature_experiment']:
+		raise ValueError('模型特征消融实验与当前配置不一致，请先重新训练')
+	if metadata.get('source_feature_set', config['feature_num']) != config['feature_num']:
+		raise ValueError('模型特征来源与当前配置不一致，请先重新训练')
 	stock_ids = metadata['stock_ids']
 	if set(stock_ids) != set(available_codes):
 		raise ValueError('模型股票池与当前 stock_data 股票池不一致，请重新训练')

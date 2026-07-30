@@ -11,6 +11,7 @@ from config import config
 from model import build_model
 from utils import add_cross_sectional_market_features, build_model_feature_columns
 from utils import engineer_features_39, engineer_features_158plus39
+from utils import select_feature_experiment_columns
 from utils import create_labeled_ranking_dataset, create_multitask_ranking_dataset, create_ranking_dataset_vectorized
 import joblib
 import os
@@ -76,7 +77,12 @@ def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
     assert config['feature_num'] in feature_engineer_func_map, f"Unsupported feature_num: {config['feature_num']}"
     assert stockid2idx is not None, "stockid2idx 不能为空"
     feature_engineer = feature_engineer_func_map[config['feature_num']]
-    feature_columns = build_model_feature_columns(feature_cloums_map[config['feature_num']])
+    base_feature_columns = select_feature_experiment_columns(
+        feature_cloums_map,
+        source_feature_set=config['feature_num'],
+        experiment=config['feature_experiment'],
+    )
+    feature_columns = build_model_feature_columns(base_feature_columns)
 
     # 保证时序正确，避免 shift 标签错位
     df = df.copy()
@@ -1041,6 +1047,9 @@ def main():
         'data_mode': config['data_mode'],
         'model_type': config['model_type'],
         'feature_schema_version': config['feature_schema_version'],
+        'feature_experiment': config['feature_experiment'],
+        'source_feature_set': config['feature_num'],
+        'feature_count': len(features),
         'data_as_of_date': config.get('data_as_of_date'),
         'stock_ids': stock_ids,
         'features': features,
