@@ -1,2 +1,0 @@
-OOF top-5 mean return: 0.008401
-Selected epochs: 4

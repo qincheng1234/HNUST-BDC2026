@@ -10,18 +10,12 @@ SRC = os.path.join(ROOT, "code", "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from model import (
-    CausalCrossSectionalFactorMixer,
-    CausalMultiscaleMarketFactorMixer,
-    CrossSectionalResidualFactorMixer,
-    _causal_moving_average,
-    build_model,
-)
+from model import CrossSectionalResidualFactorMixer, build_model
 
 
 def model_config(sequence_length=12, d_model=32):
     return {
-        "model_type": "causal_factor_mixer_v1",
+        "model_type": "causal_factor_mixer_v2",
         "sequence_length": sequence_length,
         "d_model": d_model,
         "mixer_layers": 2,
@@ -30,66 +24,67 @@ def model_config(sequence_length=12, d_model=32):
         "mixer_expansion": 2,
         "factor_count": 4,
         "dropout": 0.0,
+        "cross_sectional_epsilon": 1e-6,
     }
 
 
 class CausalFactorMixerTest(unittest.TestCase):
     def test_forward_shapes_and_gradients(self):
         torch.manual_seed(17)
-        model = CausalCrossSectionalFactorMixer(5, model_config(), num_stocks=10)
+        model = CrossSectionalResidualFactorMixer(5, model_config(), num_stocks=10)
         inputs = torch.randn(2, 10, 12, 5, requires_grad=True)
         mask = torch.ones(2, 10, dtype=torch.bool)
 
-        outputs = model(inputs, mask=mask)
+        scores = model(inputs, mask=mask)
+        self.assertEqual(scores.shape, (2, 10))
+        self.assertTrue(torch.isfinite(scores).all())
 
-        self.assertEqual(outputs["ranking_score"].shape, (2, 10))
-        self.assertEqual(outputs["horizon_return"].shape, (2, 10, 3))
-        self.assertEqual(outputs["downside_risk"].shape, (2, 10))
-        self.assertTrue(all(torch.isfinite(value).all() for value in outputs.values()))
-
-        outputs["ranking_score"].mean().backward()
+        scores.mean().backward()
         self.assertIsNotNone(inputs.grad)
         self.assertTrue(torch.isfinite(inputs.grad).all())
 
-    def test_factor_context_changes_other_stock_scores(self):
+    def test_cross_stock_interaction(self):
+        """Changing one stock alters other stock scores via factor mixer."""
         torch.manual_seed(19)
-        model = CausalCrossSectionalFactorMixer(5, model_config(), num_stocks=10).eval()
+        model = CrossSectionalResidualFactorMixer(5, model_config(), num_stocks=10)
+        model.eval()
         inputs = torch.randn(1, 10, 12, 5)
-        changed_inputs = inputs.clone()
-        changed_inputs[:, 0] += 0.5
+        changed = inputs.clone()
+        changed[:, 0] += 0.5
         mask = torch.ones(1, 10, dtype=torch.bool)
 
         with torch.no_grad():
-            original = model(inputs, mask=mask)["ranking_score"]
-            changed = model(changed_inputs, mask=mask)["ranking_score"]
+            original = model(inputs, mask=mask)
+            new = model(changed, mask=mask)
 
-        self.assertFalse(torch.allclose(original[:, 1:], changed[:, 1:]))
+        self.assertFalse(torch.allclose(original[:, 1:], new[:, 1:]))
 
-    def test_padding_does_not_change_valid_stock_scores(self):
+    def test_padding_does_not_affect_valid_stocks(self):
         torch.manual_seed(23)
-        model = CausalCrossSectionalFactorMixer(5, model_config(), num_stocks=6).eval()
+        model = CrossSectionalResidualFactorMixer(5, model_config(), num_stocks=6)
+        model.eval()
         inputs = torch.randn(1, 6, 12, 5)
         mask = torch.tensor([[True, True, True, True, False, False]])
-        changed_inputs = inputs.clone()
-        changed_inputs[:, 4:] += 100.0
+        changed = inputs.clone()
+        changed[:, 4:] += 100.0
 
         with torch.no_grad():
-            original = model(inputs, mask=mask)["ranking_score"]
-            changed = model(changed_inputs, mask=mask)["ranking_score"]
+            original = model(inputs, mask=mask)
+            new = model(changed, mask=mask)
 
-        self.assertTrue(torch.allclose(original[:, :4], changed[:, :4], atol=1e-6))
+        self.assertTrue(torch.allclose(original[:, :4], new[:, :4], atol=1e-6))
 
-    def test_build_model_and_default_scale(self):
+    def test_build_model_and_parameter_budget(self):
         config = model_config(sequence_length=60, d_model=128)
         config["time_mixer_hidden"] = 32
         config["factor_count"] = 8
         model = build_model(197, config, num_stocks=300)
-        parameter_count = sum(parameter.numel() for parameter in model.parameters())
+        param_count = sum(p.numel() for p in model.parameters())
 
-        self.assertIsInstance(model, CausalCrossSectionalFactorMixer)
-        self.assertLess(parameter_count, 800_000)
+        self.assertIsInstance(model, CrossSectionalResidualFactorMixer)
+        self.assertLess(param_count, 800_000)
 
-    def test_residual_encoder_is_invariant_to_market_common_offsets(self):
+    def test_residual_encoder_is_invariant_to_common_offset(self):
         torch.manual_seed(29)
         config = model_config()
         model = CrossSectionalResidualFactorMixer(5, config, num_stocks=6)
@@ -102,70 +97,16 @@ class CausalFactorMixerTest(unittest.TestCase):
 
         self.assertTrue(torch.allclose(original, shifted, atol=1e-6))
 
-    def test_residual_model_factory_and_outputs(self):
-        torch.manual_seed(31)
+    def test_factory_produces_correct_type(self):
         config = model_config()
-        config["model_type"] = "causal_factor_mixer_v2"
         model = build_model(5, config, num_stocks=6)
-        inputs = torch.randn(1, 6, 12, 5)
-
-        outputs = model(inputs, mask=torch.ones(1, 6, dtype=torch.bool))
-
         self.assertIsInstance(model, CrossSectionalResidualFactorMixer)
-        self.assertEqual(outputs["ranking_score"].shape, (1, 6))
-
-    def test_causal_moving_average_does_not_use_later_steps(self):
-        inputs = torch.tensor([[[1.0], [2.0], [3.0], [4.0], [5.0]]])
-        changed_inputs = inputs.clone()
-        changed_inputs[:, 3:] += 100.0
-
-        original = _causal_moving_average(inputs, window=3)
-        changed = _causal_moving_average(changed_inputs, window=3)
-
-        self.assertTrue(torch.allclose(original[:, :3], changed[:, :3]))
-
-    def test_multiscale_market_mixer_factory_and_masking(self):
-        torch.manual_seed(37)
-        config = model_config(sequence_length=12, d_model=32)
-        config.update(
-            {
-                "model_type": "causal_multiscale_market_mixer_v1",
-                "stock_short_window": 3,
-                "stock_long_window": 6,
-                "market_token_windows": (1, 3, 6),
-            }
+        scores = model(
+            torch.randn(1, 6, 12, 5),
+            mask=torch.ones(1, 6, dtype=torch.bool),
         )
-        model = build_model(5, config, num_stocks=6).eval()
-        self.assertIsInstance(model, CausalMultiscaleMarketFactorMixer)
+        self.assertEqual(scores.shape, (1, 6))
 
-        inputs = torch.randn(1, 6, 12, 5)
-        mask = torch.tensor([[True, True, True, True, False, False]])
-        changed_inputs = inputs.clone()
-        changed_inputs[:, 4:] += 100.0
-
-        with torch.no_grad():
-            original = model(inputs, mask=mask)["ranking_score"]
-            changed = model(changed_inputs, mask=mask)["ranking_score"]
-
-        self.assertEqual(original.shape, (1, 6))
-        self.assertTrue(torch.allclose(original[:, :4], changed[:, :4], atol=1e-6))
-
-    def test_multiscale_market_mixer_is_compact(self):
-        config = model_config(sequence_length=60, d_model=128)
-        config.update(
-            {
-                "model_type": "causal_multiscale_market_mixer_v1",
-                "time_mixer_hidden": 32,
-                "factor_count": 8,
-                "stock_short_window": 5,
-                "stock_long_window": 20,
-                "market_token_windows": (1, 5, 20),
-            }
-        )
-        model = build_model(211, config, num_stocks=300)
-        parameter_count = sum(parameter.numel() for parameter in model.parameters())
-
-        self.assertLess(parameter_count, 1_000_000)
 
 if __name__ == "__main__":
     unittest.main()

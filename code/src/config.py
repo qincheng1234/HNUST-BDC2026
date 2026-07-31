@@ -4,19 +4,16 @@ import os
 
 sequence_length = 60
 feature_num = '158+39'
-output_dir = f'./model/{sequence_length}_{feature_num}_causal_multiscale_market_mixer'
+output_dir = f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mixer'
 
 config = {
     'sequence_length': sequence_length,   # 使用过去60个交易日的数据（排序任务可以用稍短的序列）
-    'model_type': 'causal_multiscale_market_mixer_v1',
-    'feature_schema_version': 'cross_sectional_residual_multiscale_v1',
+    'model_type': 'causal_factor_mixer_v2',
+    'feature_schema_version': 'cross_sectional_residual_v3',
     'd_model': 128,
     'mixer_layers': 2,
     'time_mixer_hidden': 32,
     'mixer_expansion': 2,
-    'stock_short_window': 5,
-    'stock_long_window': 20,
-    'market_token_windows': (1, 5, 20),
     'factor_count': 8,
     'market_mixer_layers': 1,
     'cross_sectional_epsilon': 1e-6,
