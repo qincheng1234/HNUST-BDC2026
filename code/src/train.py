@@ -431,7 +431,7 @@ def evaluate_ranking_model(model, dataloader, criterion, device, epoch):
                     )
                     relevance_scores = relevance_scores.detach()
                     loss = criterion(valid_pred.unsqueeze(0), relevance_scores.unsqueeze(0))
-                    batch_loss = batch_loss + loss if not isinstance(batch_loss, torch.Tensor) else loss
+                    batch_loss = batch_loss + loss if isinstance(batch_loss, torch.Tensor) else loss
 
             if batch_loss is not None:
                 batch_loss = batch_loss / sequences.size(0)

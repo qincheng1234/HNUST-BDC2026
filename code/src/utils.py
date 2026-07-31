@@ -425,8 +425,8 @@ def create_labeled_ranking_dataset(
     for instrument, group in prepared.groupby("instrument", sort=False):
         if len(group) < sequence_length:
             continue
-        feature_values = group[features].to_numpy(dtype=np.float32, copy=False)
-        labels = group["label"].to_numpy(dtype=np.float32, copy=False)
+        feature_values = group[features].to_numpy(dtype=np.float32, copy=True)
+        labels = group["label"].to_numpy(dtype=np.float32, copy=True)
         dates = group["日期"].to_numpy()
 
         for start in range(len(group) - sequence_length + 1):
@@ -453,7 +453,7 @@ def create_labeled_ranking_dataset(
     for _, group in window_frame.groupby("date", sort=True):
         if len(group) < 10:
             continue
-        day_targets = group["target"].to_numpy(dtype=np.float32, copy=False)
+        day_targets = group["target"].to_numpy(dtype=np.float32, copy=True)
         order = np.argsort(day_targets)[::-1]
         relevance = np.empty(len(day_targets), dtype=np.float32)
         relevance[order] = np.arange(len(day_targets), 0, -1, dtype=np.float32)
@@ -461,7 +461,7 @@ def create_labeled_ranking_dataset(
         targets.append(day_targets)
         relevance_scores.append(relevance)
         stock_indices.append(
-            group["instrument"].to_numpy(dtype=np.int64, copy=False),
+            group["instrument"].to_numpy(dtype=np.int64, copy=True),
         )
 
     if not sequences:
