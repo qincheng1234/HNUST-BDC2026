@@ -9,13 +9,13 @@ output_dir = f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mi
 config = {
     'sequence_length': sequence_length,   # 使用过去60个交易日的数据（排序任务可以用稍短的序列）
     'model_type': 'causal_factor_mixer_v2',
-    'feature_schema_version': 'cross_sectional_residual_v6_sector_soft',
+    'feature_schema_version': 'cross_sectional_residual_v7_market_regime',
     'd_model': 128,
     'mixer_layers': 2,
-    'time_mixer_hidden': 32,
+    'time_mixer_hidden': 64,
     'mixer_expansion': 2,
     'factor_count': 8,
-    'market_mixer_layers': 1,
+    'market_mixer_layers': 2,
     'cross_sectional_epsilon': 1e-6,
     'batch_size': 4,        # 排序任务batch_size可以小一些，因为每个batch包含更多股票
     'num_epochs': 50,       # 排序任务可能需要更多epochs

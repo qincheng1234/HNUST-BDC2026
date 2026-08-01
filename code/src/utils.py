@@ -25,6 +25,10 @@ CROSS_SECTIONAL_FEATURES = [
     "market_turnover_median",
     "relative_return_1",
     "relative_return_5",
+    # regime-change indicators (v7)
+    "market_skewness_1",
+    "market_vol_ratio",
+    "cs_reversal_5",
 ]
 
 
@@ -77,6 +81,39 @@ def add_cross_sectional_market_features(frame):
     data["market_turnover_median"] = grouped["换手率"].transform("median")
     data["relative_return_1"] = data["return_1"] - data["market_return_1"]
     data["relative_return_5"] = data["return_5"] - data["market_return_5"]
+
+    # ---- regime-change features (v7) ----
+    # market_skewness_1: cross-sectional return skew → fat-tail / crash signal
+    data["market_skewness_1"] = (
+        grouped["return_1"]
+        .transform(lambda v: v.skew() if len(v) >= 10 else 0.0)
+        .fillna(0.0)
+    )
+
+    # market_vol_ratio:  mean return of top-20%-vol stocks / bottom-20%-vol stocks
+    # >1 = risk-taking rewarded (momentum regime), <1 = defense dominates
+    def _vol_ratio(grp):
+        if len(grp) < 20:
+            return 0.0
+        hi = grp["return_1"][grp["volatility_20"] >= grp["volatility_20"].quantile(0.8)]
+        lo = grp["return_1"][grp["volatility_20"] <= grp["volatility_20"].quantile(0.2)]
+        hi_mean = hi.mean() if len(hi) > 0 else 0.0
+        lo_mean = lo.mean() if len(lo) > 0 else 0.0
+        return hi_mean / (abs(lo_mean) + 1e-6)
+
+    vol_ratios = []
+    for _, grp in data.groupby("日期", sort=False):
+        val = _vol_ratio(grp)
+        vol_ratios.extend([val] * len(grp))
+    data["market_vol_ratio"] = vol_ratios
+
+    # cs_reversal_5: cross-sectional rank of reversal signal
+    #   reversal = today's return / (abs(5-day return) + ε)
+    # High rank → stock that bounced today after being weak for 5 days
+    reversal_raw = data["return_1"] / (data["return_5"].abs() + 1e-6)
+    data["cs_reversal_5"] = (
+        reversal_raw.groupby(data["日期"]).rank(pct=True).fillna(0.5)
+    )
 
     data[CROSS_SECTIONAL_FEATURES] = (
         data[CROSS_SECTIONAL_FEATURES]
