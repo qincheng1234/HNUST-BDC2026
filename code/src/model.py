@@ -49,24 +49,33 @@ class TemporalMixBlock(nn.Module):
         return outputs + self.dropout(self.feature_mixer(self.feature_norm(outputs)))
 
 
-class MultiScalePool(nn.Module):
-    """Aggregate latest, short (5d), medium (20d) and full-window states."""
+class LearnableTemporalPool(nn.Module):
+    """Learn position-aware attention weights over the temporal dimension.
 
-    def __init__(self, d_model, dropout):
+    Replaces the fixed-window MultiScalePool so the model can shift its
+    temporal focus when market regimes change (e.g. giving more weight to
+    the most recent 5-10 days during a style rotation).
+    """
+
+    def __init__(self, sequence_length, d_model, dropout):
         super().__init__()
+        self.position_bias = nn.Parameter(torch.zeros(sequence_length))
+        self.query = nn.Parameter(torch.randn(d_model) * 0.02)
         self.projection = nn.Sequential(
-            nn.Linear(d_model * 4, d_model),
+            nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.LayerNorm(d_model),
         )
 
     def forward(self, inputs):
-        latest = inputs[:, -1]
-        short = inputs[:, -5:].mean(dim=1)
-        medium = inputs[:, -20:].mean(dim=1)
-        long = inputs.mean(dim=1)
-        return self.projection(torch.cat([latest, short, medium, long], dim=-1))
+        # inputs: [batch, seq_len, d_model]
+        scale = math.sqrt(inputs.size(-1))
+        scores = torch.einsum("bld,d->bl", inputs, self.query) / scale
+        scores = scores + self.position_bias
+        weights = torch.softmax(scores, dim=1)
+        pooled = torch.einsum("bld,bl->bd", inputs, weights)
+        return self.projection(pooled)
 
 
 def _masked_mean(inputs, mask, dim):
@@ -157,7 +166,7 @@ class CrossSectionalResidualFactorMixer(nn.Module):
             TemporalMixBlock(self.sequence_length, d_model, time_hidden, expansion, dropout)
             for _ in range(mixer_layers)
         ])
-        self.temporal_pool = MultiScalePool(d_model, dropout)
+        self.temporal_pool = LearnableTemporalPool(self.sequence_length, d_model, dropout)
 
         # ---- market path --------------------------------------------------
         self.market_projection = nn.Sequential(
@@ -167,7 +176,7 @@ class CrossSectionalResidualFactorMixer(nn.Module):
             TemporalMixBlock(self.sequence_length, d_model, time_hidden, expansion, dropout)
             for _ in range(market_layers)
         ])
-        self.market_pool = MultiScalePool(d_model, dropout)
+        self.market_pool = LearnableTemporalPool(self.sequence_length, d_model, dropout)
 
         # ---- cross-stock interaction --------------------------------------
         self.factor_mixer = DynamicFactorMixer(d_model, factor_count, dropout)

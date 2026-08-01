@@ -4,12 +4,12 @@ import os
 
 sequence_length = 60
 feature_num = '158+39'
-output_dir = f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mixer'
+output_dir = f'./model/{sequence_length}_{feature_num}_causal_residual_factor_mixer_temporal_attn'
 
 config = {
     'sequence_length': sequence_length,   # 使用过去60个交易日的数据（排序任务可以用稍短的序列）
     'model_type': 'causal_factor_mixer_v2',
-    'feature_schema_version': 'cross_sectional_residual_v3',
+    'feature_schema_version': 'cross_sectional_residual_v4_temporal_attn',
     'd_model': 128,
     'mixer_layers': 2,
     'time_mixer_hidden': 32,
