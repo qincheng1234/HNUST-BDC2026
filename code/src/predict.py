@@ -142,20 +142,21 @@ def _resolve_industry_path():
     return primary  # let load_industry_map report missing file
 
 
-def sector_diversified_top_k(scores, stock_ids, industry_map, k=5):
-    """Select top-k stocks with sector diversity constraint.
+def sector_diversified_top_k(scores, stock_ids, industry_map, k=5,
+                             max_per_sector=2, min_sectors=3):
+    """Select top-k stocks with soft sector diversity.
 
-    Algorithm:
-      1. Sort stocks by score descending.
-      2. Iterate, picking the highest-scoring stock from each sector
-         (one per sector max).
-      3. If fewer than k sectors are available, fill remaining slots
-         from the highest-scoring unpicked stocks.
+    * At most *max_per_sector* picks from any one sector.
+    * Aim for at least *min_sectors* distinct sectors (best-effort;
+      does NOT force picking bad stocks from weak sectors).
+
+    If min_sectors cannot be reached with the remaining candidate pool
+    the constraint is silently relaxed — diversity is a preference,
+    not a hard rule that would sacrifice return.
 
     Returns list of k stock_ids.
     """
     if not industry_map or len(industry_map) < 5:
-        # Fallback: unconstrained top-k
         order = np.argsort(scores)[::-1]
         return [stock_ids[i] for i in order[:k]]
 
@@ -163,28 +164,77 @@ def sector_diversified_top_k(scores, stock_ids, industry_map, k=5):
     order = np.argsort(scores)[::-1]
 
     selected = []
-    used_sectors = set()
+    sector_counts: dict[str, int] = {}
 
-    # First pass: best stock from each sector
+    # Phase 1 — greedy with per-sector cap
     for idx in order:
         sector = industries[idx]
-        if sector not in used_sectors:
+        if sector_counts.get(sector, 0) >= max_per_sector:
+            continue
+        selected.append(idx)
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        if len(selected) == k:
+            break
+
+    # Phase 2 — fill remaining slots if cap prevented k selections
+    if len(selected) < k:
+        for idx in order:
+            if idx in selected:
+                continue
             selected.append(idx)
-            used_sectors.add(sector)
+            sector_counts[industries[idx]] = sector_counts.get(industries[idx], 0) + 1
             if len(selected) == k:
                 break
 
-    # Second pass: fill remaining if < k unique sectors
-    if len(selected) < k:
+    # Phase 3 — best-effort sector diversity improvement
+    for _ in range(k):  # at most k swap attempts
+        unique_now = len(sector_counts)
+        if unique_now >= min_sectors:
+            break
+
+        # Find all sectors NOT yet represented
+        present_sectors = set(sector_counts.keys())
+        missing = {industries[i] for i in order if i not in selected} - present_sectors
+        if not missing:
+            break  # no new sectors available, accept current selection
+
+        # Find the most replaceable selected stock:
+        # lowest-scoring pick from a sector that has >1 representation
+        candidates_to_swap = [
+            (i, pos) for pos, i in enumerate(selected)
+            if sector_counts[industries[i]] > 1
+        ]
+        if not candidates_to_swap:
+            break  # every sector has exactly 1, can't improve
+
+        # Sort by score ascending — we want to swap out the weakest duplicate
+        candidates_to_swap.sort(key=lambda x: scores[x[0]])
+        weakest_idx, weakest_pos = candidates_to_swap[0]
+        weakest_sector = industries[weakest_idx]
+
+        # Find the best unpicked stock from a missing sector
+        best_new = None
         for idx in order:
-            if idx not in selected:
-                selected.append(idx)
-                if len(selected) == k:
-                    break
+            if idx in selected:
+                continue
+            if industries[idx] in missing:
+                best_new = idx
+                break
+
+        if best_new is None:
+            break  # no suitable replacement
+
+        # Execute swap
+        sector_counts[weakest_sector] -= 1
+        selected[weakest_pos] = best_new
+        new_sector = industries[best_new]
+        sector_counts[new_sector] = sector_counts.get(new_sector, 0) + 1
 
     result = [stock_ids[i] for i in selected]
     unique_sectors = len({industries[i] for i in selected})
-    print(f"  Sector-diversified top-{k}: {len(used_sectors)} unique sectors")
+    print(f"  Sector-diversified top-{k}: "
+          f"{unique_sectors} sectors, "
+          f"max {max(sector_counts.values())}/sector")
     return result
 
 
