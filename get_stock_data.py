@@ -336,7 +336,7 @@ def download_data(save_dir, start_date, end_date, universe_date):
 
 
 def main():
-    save_dir = Path("./data")
+    save_dir = Path(os.environ.get("STOCK_DATA_SAVE_DIR", "./data"))
     start_date = os.environ.get("STOCK_DATA_START_DATE", "2024-01-01")
     end_date = os.environ.get("STOCK_DATA_END_DATE", datetime.today().strftime("%Y-%m-%d"))
     universe_date = os.environ.get("STOCK_UNIVERSE_DATE", end_date)

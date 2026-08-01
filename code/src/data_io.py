@@ -32,14 +32,27 @@ def normalize_stock_code(value):
     return code_match.group(1) if code_match is not None else None
 
 
-def resolve_stock_data_path(data_path, filenames=STOCK_DATA_FILENAMES):
-    data_dir = Path(data_path)
-    for filename in filenames:
-        candidate = data_dir / filename
-        if candidate.is_file() and candidate.stat().st_size > 0:
-            return candidate
-    expected = ", ".join(str(data_dir / filename) for filename in filenames)
-    raise FileNotFoundError(f"Missing market-data file; checked: {expected}")
+def resolve_stock_data_path(data_path, filenames=STOCK_DATA_FILENAMES, model_dir=None):
+    """Find the stock data file, checking model_dir first (Docker-safe).
+
+    When *model_dir* is provided it takes priority over *data_path* so that
+    a copy of stock_data.csv stored alongside the model survives the Docker
+    mounts (data/, output/, temp/ are overwritten at verification time).
+    """
+    search_dirs = []
+    if model_dir is not None:
+        search_dirs.append(Path(model_dir))
+    search_dirs.append(Path(data_path))
+
+    checked = []
+    for base in search_dirs:
+        for filename in filenames:
+            candidate = base / filename
+            checked.append(str(candidate))
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+
+    raise FileNotFoundError(f"Missing market-data file; checked: {', '.join(checked)}")
 
 
 def load_contest_stock_data(
@@ -47,9 +60,10 @@ def load_contest_stock_data(
     expected_stock_count=300,
     as_of_date=None,
     filenames=STOCK_DATA_FILENAMES,
+    model_dir=None,
 ):
     """Load normalized market data, optionally cutting off future local rows."""
-    source_path = resolve_stock_data_path(data_path, filenames=filenames)
+    source_path = resolve_stock_data_path(data_path, filenames=filenames, model_dir=model_dir)
     frame = pd.read_csv(source_path, dtype={"股票代码": str})
     missing_columns = REQUIRED_COLUMNS - set(frame.columns)
     if missing_columns:
@@ -85,7 +99,8 @@ def load_contest_stock_data(
     return data.sort_values(["股票代码", "日期"]).reset_index(drop=True), stock_codes, source_path
 
 
-def load_training_data(data_path, data_mode, expected_stock_count=300, as_of_date=None):
+def load_training_data(data_path, data_mode, expected_stock_count=300, as_of_date=None,
+                      model_dir=None):
     """Load the model-training history for local scoring or final submission."""
     if data_mode not in DATA_MODES:
         raise ValueError(f"Unsupported DATA_MODE: {data_mode}; expected one of {sorted(DATA_MODES)}")
@@ -95,14 +110,17 @@ def load_training_data(data_path, data_mode, expected_stock_count=300, as_of_dat
         expected_stock_count=expected_stock_count,
         as_of_date=as_of_date,
         filenames=filenames,
+        model_dir=model_dir,
     )
 
 
-def load_prediction_data(data_path, data_mode, expected_stock_count=300, as_of_date=None):
+def load_prediction_data(data_path, data_mode, expected_stock_count=300, as_of_date=None,
+                         model_dir=None):
     """Load prediction history without ever consuming the local held-out test week."""
     return load_training_data(
         data_path,
         data_mode=data_mode,
         expected_stock_count=expected_stock_count,
         as_of_date=as_of_date,
+        model_dir=model_dir,
     )

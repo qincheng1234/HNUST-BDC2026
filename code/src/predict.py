@@ -258,6 +258,7 @@ def main():
         data_mode=config["data_mode"],
         expected_stock_count=config.get("competition_stock_count", 300),
         as_of_date=config.get("data_as_of_date"),
+        model_dir=config["output_dir"],
     )
     latest_date = raw_df["日期"].max()
 
