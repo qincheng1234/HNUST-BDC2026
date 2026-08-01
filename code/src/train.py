@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 from config import config
 from data_io import load_training_data
+from industry import ensure_industry_data
 from model import build_model
 from splits import build_walk_forward_folds, select_robust_epoch, trading_dates_from_frame
 from utils import (
@@ -503,7 +504,8 @@ def fit_model(train_dataset, validation_dataset, input_dim, stock_count,
         base_weight=config.get("base_weight", 1.0),
     ).to(device)
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=config["learning_rate"], weight_decay=1e-5,
+        model.parameters(), lr=config["learning_rate"],
+        weight_decay=float(config.get("weight_decay", 1e-5)),
     )
     train_loader = build_loader(train_dataset, shuffle=True)
     validation_loader = (
@@ -607,6 +609,9 @@ def main():
     )
 
     stock_ids = sorted(stock_codes)
+
+    # Ensure industry classification is available for sector-diversified prediction
+    ensure_industry_data(stock_ids, output_dir, data_dir=config["data_path"])
     stockid2idx = {sid: idx for idx, sid in enumerate(stock_ids)}
     processed, features = preprocess_data(
         full_df, is_train=True, stockid2idx=stockid2idx,

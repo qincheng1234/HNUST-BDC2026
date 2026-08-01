@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from config import config
 from data_io import load_prediction_data
+from industry import load_industry_map
 from model import build_model
 from utils import (
     add_cross_sectional_market_features,
@@ -130,6 +131,63 @@ def resolve_device():
     return torch.device("cpu")
 
 
+def _resolve_industry_path():
+    """Return the best industry csv path, checking model dir first (Docker-safe)."""
+    primary = os.path.join(config["output_dir"], "sw_industry.csv")
+    if os.path.exists(primary):
+        return primary
+    fallback = os.path.join(config["data_path"], "sw_industry.csv")
+    if os.path.exists(fallback):
+        return fallback
+    return primary  # let load_industry_map report missing file
+
+
+def sector_diversified_top_k(scores, stock_ids, industry_map, k=5):
+    """Select top-k stocks with sector diversity constraint.
+
+    Algorithm:
+      1. Sort stocks by score descending.
+      2. Iterate, picking the highest-scoring stock from each sector
+         (one per sector max).
+      3. If fewer than k sectors are available, fill remaining slots
+         from the highest-scoring unpicked stocks.
+
+    Returns list of k stock_ids.
+    """
+    if not industry_map or len(industry_map) < 5:
+        # Fallback: unconstrained top-k
+        order = np.argsort(scores)[::-1]
+        return [stock_ids[i] for i in order[:k]]
+
+    industries = [industry_map.get(sid, f"__unknown_{i}__") for i, sid in enumerate(stock_ids)]
+    order = np.argsort(scores)[::-1]
+
+    selected = []
+    used_sectors = set()
+
+    # First pass: best stock from each sector
+    for idx in order:
+        sector = industries[idx]
+        if sector not in used_sectors:
+            selected.append(idx)
+            used_sectors.add(sector)
+            if len(selected) == k:
+                break
+
+    # Second pass: fill remaining if < k unique sectors
+    if len(selected) < k:
+        for idx in order:
+            if idx not in selected:
+                selected.append(idx)
+                if len(selected) == k:
+                    break
+
+    result = [stock_ids[i] for i in selected]
+    unique_sectors = len({industries[i] for i in selected})
+    print(f"  Sector-diversified top-{k}: {len(used_sectors)} unique sectors")
+    return result
+
+
 def main():
     model_path = os.path.join(config["output_dir"], "best_model.pth")
     scaler_path = os.path.join(config["output_dir"], "scaler.pkl")
@@ -152,6 +210,9 @@ def main():
         as_of_date=config.get("data_as_of_date"),
     )
     latest_date = raw_df["日期"].max()
+
+    # Load industry mapping for sector-diversified prediction
+    industry_map = load_industry_map(_resolve_industry_path())
 
     with open(metadata_path, encoding="utf-8") as f:
         metadata = json.load(f)
@@ -221,7 +282,11 @@ def main():
         raise ValueError(
             f"Insufficient stocks for prediction: {len(ranked_stock_ids)} < 5"
         )
-    top5 = ranked_stock_ids[:5]
+
+    # Sector-diversified top-5 (falls back to unconstrained if no industry data)
+    top5 = sector_diversified_top_k(
+        scores, sequence_stock_ids, industry_map, k=5,
+    )
     output_df = pd.DataFrame({
         "stock_id": top5,
         "weight": [0.2] * len(top5),
