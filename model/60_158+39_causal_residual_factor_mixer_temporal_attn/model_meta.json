@@ -1,5 +1,5 @@
 {
-  "input_file": "data/stock_data.csv",
+  "input_file": "model/60_158+39_causal_residual_factor_mixer_temporal_attn/stock_data.csv",
   "data_mode": "stock_data",
   "model_type": "causal_factor_mixer_v2",
   "feature_schema_version": "cross_sectional_residual_v7_market_regime",
