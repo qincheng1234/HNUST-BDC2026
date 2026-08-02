@@ -339,11 +339,19 @@ def main():
         scores, sequence_stock_ids, industry_map, k=5,
     )
 
-    # Score-proportional weights: higher model confidence → higher allocation
+    # Score-proportional weights: higher model confidence → higher allocation.
+    # Negative scores → zero weight; remainder is cash (sum ≤ 1 by design).
     top5_indices = [sequence_stock_ids.index(sid) for sid in top5]
     top5_scores = scores[top5_indices]
     pos_scores = np.maximum(top5_scores, 0.0)
-    weights = pos_scores / pos_scores.sum()
+    if pos_scores.sum() > 0:
+        weights = pos_scores / pos_scores.sum()
+    else:
+        weights = np.ones(len(top5)) / len(top5)  # all-negative: equal fallback
+    # Clip fp noise so sum never exceeds 1 in CSV output
+    weights = np.round(weights, 6)
+    if weights.sum() > 1.0:
+        weights[-1] -= weights.sum() - 1.0
 
     output_df = pd.DataFrame({
         "stock_id": top5,
