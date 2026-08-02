@@ -329,14 +329,14 @@ def main():
     order = np.argsort(scores)[::-1]
     ranked_stock_ids = [sequence_stock_ids[i] for i in order]
 
-    if len(ranked_stock_ids) < 5:
+    if len(ranked_stock_ids) < 4:
         raise ValueError(
-            f"Insufficient stocks for prediction: {len(ranked_stock_ids)} < 5"
+            f"Insufficient stocks for prediction: {len(ranked_stock_ids)} < 4"
         )
 
-    # Sector-diversified top-5 (falls back to unconstrained if no industry data)
+    # Sector-diversified top-K (falls back to unconstrained if no industry data)
     top5 = sector_diversified_top_k(
-        scores, sequence_stock_ids, industry_map, k=5,
+        scores, sequence_stock_ids, industry_map, k=4,
     )
 
     # Score-proportional weights: higher model confidence → higher allocation.
