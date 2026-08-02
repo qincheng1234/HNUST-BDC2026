@@ -338,9 +338,16 @@ def main():
     top5 = sector_diversified_top_k(
         scores, sequence_stock_ids, industry_map, k=5,
     )
+
+    # Score-proportional weights: higher model confidence → higher allocation
+    top5_indices = [sequence_stock_ids.index(sid) for sid in top5]
+    top5_scores = scores[top5_indices]
+    pos_scores = np.maximum(top5_scores, 0.0)
+    weights = pos_scores / pos_scores.sum()
+
     output_df = pd.DataFrame({
         "stock_id": top5,
-        "weight": [0.2] * len(top5),
+        "weight": weights,
     })
     output_df.to_csv(output_path, index=False)
 
